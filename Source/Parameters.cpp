@@ -29,12 +29,13 @@ APVTS::ParameterLayout createParameterLayout()
     // program
     p.push_back(floatParam(PP::PRESET, "Preset", 0, 127, 0));
     p.push_back(floatParam(PP::BANK, "Bank", 0, 127, 0));
-    // ADSR (off by default: the soundfont plays as authored)
+    // ADSR (off by default: the soundfont plays as authored). Defaults are
+    // neutral: fastest attack, full decay/sustain, tiny release.
     p.push_back(boolParam(PP::ADSRON, "ADSR On", false));
-    p.push_back(floatParam(PP::ATK, "Attack", 0.001f, 4.0f, 0.01f, "s"));
-    p.push_back(floatParam(PP::DEC, "Decay", 0.005f, 4.0f, 0.25f, "s"));
-    p.push_back(floatParam(PP::SUS, "Sustain", 0.0f, 1.0f, 0.8f));
-    p.push_back(floatParam(PP::REL, "Release", 0.01f, 8.0f, 0.35f, "s"));
+    p.push_back(floatParam(PP::ATK, "Attack", 0.001f, 4.0f, 0.001f, "s"));
+    p.push_back(floatParam(PP::DEC, "Decay", 0.005f, 4.0f, 4.0f, "s"));
+    p.push_back(floatParam(PP::SUS, "Sustain", 0.0f, 1.0f, 1.0f));
+    p.push_back(floatParam(PP::REL, "Release", 0.01f, 8.0f, 0.01f, "s"));
     // filter (off by default: dry soundfont signal)
     p.push_back(boolParam(PP::FTON, "Filter On", false));
     p.push_back(choiceParam(PP::FTYPE, "Filter Type", { "Low Pass", "High Pass", "Band Pass" }, 0));

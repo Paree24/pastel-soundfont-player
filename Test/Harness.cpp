@@ -1539,6 +1539,9 @@ int main(int argc, char** argv)
             if (auto* p = proc.apvts.getParameter(id)) p->setValueNotifyingHost(norm);
         };
         check(getParam(PP::ADSRON) == 0.0f, "ADSR off by default");
+        check(getParam(PP::ATK) == 0.001f && getParam(PP::DEC) == 4.0f
+            && getParam(PP::SUS) == 1.0f && getParam(PP::REL) == 0.01f,
+            "ADSR defaults neutral (fast atk, full dec/sus, tiny rel)");
         check(getParam(PP::FTON) == 0.0f, "filter off by default");
         check(getParam(PP::LFOON) == 0.0f, "LFO off by default");
         check(getParam(PP::CHON) == 0.0f && getParam(PP::PHON) == 0.0f
@@ -1562,10 +1565,10 @@ int main(int argc, char** argv)
         float rDry2 = 0; renderNote(60, 12, rDry2);
         check(std::abs(rDry2 / juce::jmax(rDry, 1e-6f) - 1.0f) < 0.15f,
               "filter toggle restores the dry path");
-        setP(PP::ADSRON, 1.0f); setP(PP::SUS, 0.0f);
+        setP(PP::ADSRON, 1.0f); setP(PP::SUS, 0.0f); setP(PP::DEC, 0.0f); // fast decay to zero
         float rAdsr = 0; renderNote(60, 12, rAdsr);
         check(rAdsr < rDry * 0.3f, "ADSR toggle engages the UI envelope");
-        setP(PP::ADSRON, 0.0f); setP(PP::SUS, 0.8f); // restore defaults
+        setP(PP::ADSRON, 0.0f); setP(PP::SUS, 1.0f); setP(PP::DEC, 1.0f); // restore defaults
         proc.panic();
     }
 

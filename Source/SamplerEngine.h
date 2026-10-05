@@ -259,7 +259,7 @@ private:
     static constexpr int maxVoices = 64;
     Voice voices[maxVoices];
     juce::uint32 voiceCounter = 0;
-    float envA = 0.01f, envD = 0.25f, envS = 0.8f, envR = 0.35f;
+    float envA = 0.001f, envD = 4.0f, envS = 1.0f, envR = 0.01f;
     bool adsrOn = false; // UI ADSR engaged (default off: soundfont as authored)
     double hostRate = 44100.0;
 

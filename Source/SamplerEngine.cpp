@@ -1314,11 +1314,11 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool from
     vp->gainL = g * std::cos(r.pan * juce::MathConstants<float>::halfPi);
     vp->gainR = g * std::sin(r.pan * juce::MathConstants<float>::halfPi);
     // Amplitude EG: UI ADSR when its toggle is on; otherwise the soundfont
-    // plays as authored (region ampeg_*), falling back to a neutral gate
-    // (2 ms de-click attack, full sustain, 8 ms release) for plain regions.
+    // plays as authored (region ampeg_*), falling back to a neutral gate for
+    // plain regions: fastest attack, full sustain, tiny release.
     if (adsrOn) vp->env.setParams(envA, envD, envS, envR);
     else if (r.hasAmpEg) vp->env.setParams(r.ampA, r.ampD, r.ampS, r.ampR);
-    else vp->env.setParams(0.002f, 0.0f, 1.0f, 0.008f);
+    else vp->env.setParams(0.001f, 0.0f, 1.0f, 0.01f);
     // Static region filter evaluated at note-on (velocity/key/CC folded in
     // as cents; no per-sample modulation by design).
     vp->filtOn = r.hasFilter;
