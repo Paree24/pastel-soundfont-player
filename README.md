@@ -3,7 +3,7 @@
 A simple SF2/SFZ player plugin (VST3 + Standalone) with a flat pastel UI.
 Load a soundfont and play — ADSR, filter, LFO and all effects default to
 **off**, so libraries sound exactly as authored until you engage something.
-Master defaults to −12 dB headroom (hot banks peak well above 0 dBFS raw).
+Master defaults to −24 dB headroom (hot banks peak far above 0 dBFS raw).
 
 ## Features
 

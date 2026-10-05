@@ -88,8 +88,8 @@ APVTS::ParameterLayout createParameterLayout()
     p.push_back(boolParam(PP::DLSYNC, "Delay Sync", false));
     p.push_back(choiceParam(PP::DLDIV, "Delay Division",
         { "1/4", "1/8", "1/8 Dotted", "1/4 Triplet", "1/16", "1/2" }, 1));
-    // master (-12 dB default: hot banks peak well above 0 dBFS voiced raw)
-    p.push_back(floatParam(PP::VOLUME, "Volume", 0.0f, 1.25f, 0.25f));
+    // master (-24 dB default: hot banks peak far above 0 dBFS voiced raw)
+    p.push_back(floatParam(PP::VOLUME, "Volume", 0.0f, 1.25f, 0.063f));
     p.push_back(boolParam(PP::LIMIT, "Limiter", true));
     p.push_back(boolParam(PP::MONO, "Mono", false));
     // arp

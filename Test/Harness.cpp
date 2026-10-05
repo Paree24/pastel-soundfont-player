@@ -1038,7 +1038,7 @@ int main(int argc, char** argv)
                 juce::MidiBuffer m = (i == 0) ? midiB : juce::MidiBuffer();
                 proc.processBlock(bufB, m);
                 for (int s = 0; s < 512; ++s, ++gi)
-                    if (std::abs(0.5f * (bufB.getSample(0, s) + bufB.getSample(1, s))) > 0.03f) last = gi;
+                    if (std::abs(0.5f * (bufB.getSample(0, s) + bufB.getSample(1, s))) > 0.008f) last = gi;
             }
             proc.panic();
             juce::Logger::writeToLog("gt slice end=" + juce::String(last));
@@ -1521,8 +1521,8 @@ int main(int argc, char** argv)
         check(proc.loadSoundFile(rep.getChildFile("r.sfz").getFullPathName(), err), "rep fixture loads");
         float rRep = 0; renderNote(60, 12, rRep);
         juce::Logger::writeToLog("rep sustain rms=" + juce::String(rRep));
-        // one 6 dB application sustains ~0.12 post-master; 18 dB would limit ~0.9
-        check(rRep > 0.05f && rRep < 0.5f, "repeated gain_cc folds once (no dB stacking)");
+        // one 6 dB application sustains ~0.03 post-master; 18 dB would limit ~0.9
+        check(rRep > 0.01f && rRep < 0.5f, "repeated gain_cc folds once (no dB stacking)");
         proc.panic();
     }
 
@@ -1548,7 +1548,7 @@ int main(int argc, char** argv)
             && getParam(PP::FLON) == 0.0f && getParam(PP::DION) == 0.0f
             && getParam(PP::SAON) == 0.0f && getParam(PP::RVON) == 0.0f
             && getParam(PP::DLON) == 0.0f, "FX off by default");
-        check(std::abs(getParam(PP::VOLUME) - 0.25f) < 0.001f, "master -12 dB by default");
+        check(std::abs(getParam(PP::VOLUME) - 0.063f) < 0.001f, "master -24 dB by default");
         auto dryd = tmp.getChildFile("dry");
         dryd.createDirectory();
         writeTone(dryd.getChildFile("t.wav"), 440.0f);
@@ -1557,7 +1557,7 @@ int main(int argc, char** argv)
         juce::String err;
         check(proc.loadSoundFile(dryd.getChildFile("d.sfz").getFullPathName(), err), "dry fixture loads");
         float rDry = 0; renderNote(60, 12, rDry);
-        check(rDry > 0.02f, "dry path renders full level");
+        check(rDry > 0.005f, "dry path renders full level");
         setP(PP::FTON, 1.0f); setP(PP::FCUT, 0.0f); // cutoff to 40 Hz minimum
         float rDark = 0; renderNote(60, 12, rDark);
         check(rDark < rDry * 0.3f, "filter toggle engages the filter");
