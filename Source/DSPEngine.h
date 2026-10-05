@@ -37,7 +37,7 @@ struct DspParams
     bool  dlSync = false; int dlDiv = 1;
     double bpm = 120.0;
 
-    float volume = 0.5f; // -6 dB default headroom
+    float volume = 0.25f; // -12 dB default headroom
     bool  limiter = true;
     bool  mono = false;
 };

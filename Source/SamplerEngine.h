@@ -104,9 +104,11 @@ public:
 
     void setSampleRate(double sr);
     void setEnvelope(float a, float d, float s, float r);
-    // UI ADSR engaged (default OFF): replaces the voice envelope with the
-    // knob values (shapes every voice incl. authored EGs) and shapes the
-    // SF2 master voice. Lock-protected.
+    // UI ADSR engaged (default OFF): trims the voice envelope — each knob
+    // can only move toward smaller/faster, never boost (attack takes the
+    // slower, decay/sustain/release the smaller of UI vs region). At neutral
+    // defaults plain regions are untouched. Shapes the SF2 master voice.
+    // Lock-protected.
     void setAdsrEnabled(bool on);
     bool isAdsrEnabled() const;
     // Live MIDI CC value (sfizz MidiState): loccN/hiccN gates evaluate per

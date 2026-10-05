@@ -1313,10 +1313,17 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool from
         g *= juce::Decibels::decibelsToGain(r.ampRandomDb * (rng.nextFloat() * 2.0f - 1.0f));
     vp->gainL = g * std::cos(r.pan * juce::MathConstants<float>::halfPi);
     vp->gainR = g * std::sin(r.pan * juce::MathConstants<float>::halfPi);
-    // Amplitude EG: the UI ADSR replaces when its toggle is on (knobs shape
-    // every voice); otherwise the soundfont plays as authored (region
-    // ampeg_*), falling back to a neutral gate for plain regions.
-    if (adsrOn) vp->env.setParams(envA, envD, envS, envR);
+    // Amplitude EG: the UI ADSR replaces when its toggle is on, but as a
+    // GOVERNOR — it can only trim below the authored envelope, never boost:
+    // attack takes the slower, decay/sustain/release the smaller of UI vs
+    // region. At neutral defaults (fastest/full/full/tiny) plain regions
+    // are untouched and authored regions keep attack/decay/sustain, with
+    // only the release shortened to tiny (per spec). Regions without
+    // ampeg_* use the UI values against a neutral reference (identical).
+    if (adsrOn && r.hasAmpEg)
+        vp->env.setParams(juce::jmax(envA, r.ampA), juce::jmin(envD, r.ampD),
+                          juce::jmin(envS, r.ampS), juce::jmin(envR, r.ampR));
+    else if (adsrOn) vp->env.setParams(envA, envD, envS, envR);
     else if (r.hasAmpEg) vp->env.setParams(r.ampA, r.ampD, r.ampS, r.ampR);
     else vp->env.setParams(0.001f, 0.0f, 1.0f, 0.01f); // neutral gate
     // Static region filter evaluated at note-on (velocity/key/CC folded in
