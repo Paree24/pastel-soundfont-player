@@ -10,17 +10,20 @@ namespace PP
     static constexpr const char* PRESET   = "sfpreset"; // sf2 preset index 0..127
     static constexpr const char* BANK     = "sfbank";   // sf2 bank 0..127
     // Amp envelope (applied per-voice on SFZ, post on SF2)
+    static constexpr const char* ADSRON = "adsron"; // UI ADSR active; off = soundfont EG
     static constexpr const char* ATK = "atk";
     static constexpr const char* DEC = "dec";
     static constexpr const char* SUS = "sus";
     static constexpr const char* REL = "rel";
     // Filter
+    static constexpr const char* FTON  = "filton"; // master filter active; off = dry
     static constexpr const char* FTYPE  = "ftype";  // 0 LP 1 HP 2 BP
     static constexpr const char* FCUT   = "fcut";
     static constexpr const char* FRES   = "fres";
     static constexpr const char* FDRIVE = "fdrive";
     static constexpr const char* FSLOPE = "fslope"; // 0:6dB 1:12dB 2:24dB 3:48dB
     // Filter LFO
+    static constexpr const char* LFOON = "lfoon"; // LFO active; off = no modulation
     static constexpr const char* LFORATE  = "lforate";
     static constexpr const char* LFODEPTH = "lfodepth";
     static constexpr const char* LFOWAVE  = "lfowave"; // 0 sine 1 tri 2 saw 3 square 4 s&h

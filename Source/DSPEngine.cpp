@@ -316,6 +316,15 @@ float DSPEngine::lfoSample(int wave, double phase) const
 }
 
 static float softClip(float x) { return std::tanh(x); }
+// Transparent ceiling: dry below 0.9, asymptotically limited to 1.0 above.
+static float softLimit(float x)
+{
+    float a = std::fabs(x);
+    if (a <= 0.9f) return x;
+    float s = (x < 0.0f) ? -1.0f : 1.0f;
+    float over = (a - 0.9f) / 0.9f;
+    return s * (0.9f + 0.1f * over / (1.0f + over));
+}
 
 void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
 {
@@ -335,10 +344,12 @@ void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
     float driveGain = 1.0f + p.fDrive * 12.0f;
     float driveComp = 1.0f / (1.0f + p.fDrive * 4.0f);
     double lfoInc = (double) p.lfoRate / sr;
-    bool lfoActive = p.lfoDepth > 0.0005f;
+    bool lfoActive = p.lfoOn && p.lfoDepth > 0.0005f;
 
     // ---------- per-sample: LFO + ERSA-style filter + drive ----------
-    for (int i = 0; i < N; ++i)
+    // Filter toggle off = dry pass-through (no SVF, no glue saturation,
+    // no warmth lowpass): the soundfont plays uncolored.
+    for (int i = 0; i < (p.fOn ? N : 0); ++i)
     {
         float lfo = 0.0f;
         if (lfoActive)
@@ -477,13 +488,15 @@ void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
         reverb.process(L, R, N, p.rvSize, p.rvDamp, p.rvMix);
 
     // ---------- mono sum + master + limiter + meters ----------
+    // Limiter is transparent below -0.9 dBFS and only rounds overs above it
+    // (asymptotic to 1.0): normal levels pass bit-dry, hot stacks can't clip.
     float peakL = 0.0f, peakR = 0.0f;
     for (int i = 0; i < N; ++i)
     {
         float xL = L[i], xR = R[i];
         if (p.mono) { float mid = 0.5f * (xL + xR); xL = mid; xR = mid; }
         xL *= p.volume; xR *= p.volume;
-        if (p.limiter) { xL = softClip(xL); xR = softClip(xR); }
+        if (p.limiter) { xL = softLimit(xL); xR = softLimit(xR); }
         else { xL = juce::jlimit(-1.2f, 1.2f, xL); xR = juce::jlimit(-1.2f, 1.2f, xR); }
         L[i] = xL; R[i] = xR;
         peakL = juce::jmax(peakL, std::abs(xL));

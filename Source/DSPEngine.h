@@ -15,12 +15,14 @@
 // ============================================================
 struct DspParams
 {
+    bool  fOn = false;    // master filter engaged; off = bit-dry pass-through
     int   fType = 0;      // 0 LP 1 HP 2 BP
     float fCut = 18000.0f;
     float fRes = 0.15f;
     float fDrive = 0.0f;
     int   fSlope = 1;     // 0:6 1:12 2:24 3:48
 
+    bool  lfoOn = false;  // filter LFO engaged
     float lfoRate = 2.0f, lfoDepth = 0.0f;
     int   lfoWave = 0;    // 0 sine 1 tri 2 saw 3 square 4 s&h
 
@@ -35,7 +37,7 @@ struct DspParams
     bool  dlSync = false; int dlDiv = 1;
     double bpm = 120.0;
 
-    float volume = 0.8f;
+    float volume = 0.5f; // -6 dB default headroom
     bool  limiter = true;
     bool  mono = false;
 };

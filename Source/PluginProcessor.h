@@ -106,6 +106,7 @@ private:
     float outL = 0.0f, outR = 0.0f;
     int lastBank = -1, lastPreset = -1;
     float lastA = -1, lastD = -1, lastS = -1, lastR = -1;
+    bool lastAdsrOn = false;
 
     juce::CriticalSection activeLock;
     std::set<int> activeNotes;

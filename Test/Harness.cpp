@@ -1506,6 +1506,69 @@ int main(int argc, char** argv)
         proc.panic();
     }
 
+    // gain_cc repeats must not stack: the same target+CC restated in every
+    // <global> block (Metal GTX restates gain_cc30=50 eight times) keeps ONE
+    // depth (sfizz: same connection overwritten). Summing repeats voice-
+    // stacked the noise layers into +195 dB full-scale harshness.
+    {
+        auto rep = tmp.getChildFile("rep");
+        rep.createDirectory();
+        writeTone(rep.getChildFile("t.wav"), 440.0f);
+        rep.getChildFile("r.sfz").replaceWithText(
+            "<control> set_cc10=127\n<global> gain_cc10=6\n<global> gain_cc10=6\n<global> gain_cc10=6\n"
+            "<region> sample=t.wav key=60 pitch_keycenter=60\n");
+        juce::String err;
+        check(proc.loadSoundFile(rep.getChildFile("r.sfz").getFullPathName(), err), "rep fixture loads");
+        float rRep = 0; renderNote(60, 12, rRep);
+        juce::Logger::writeToLog("rep sustain rms=" + juce::String(rRep));
+        // one 6 dB application sustains ~0.25 post-master; 18 dB would limit ~0.9
+        check(rRep > 0.1f && rRep < 0.5f, "repeated gain_cc folds once (no dB stacking)");
+        proc.panic();
+    }
+
+    // DSP bypass defaults: ADSR/Filter/LFO/FX all off, master -6 dB.
+    // The soundfont plays as authored until a toggle is engaged.
+    {
+        auto getParam = [&](const char* id) -> float
+        {
+            if (auto* v = proc.apvts.getRawParameterValue(id)) return v->load();
+            return -1.0f;
+        };
+        auto setP = [&](const char* id, float norm)
+        {
+            if (auto* p = proc.apvts.getParameter(id)) p->setValueNotifyingHost(norm);
+        };
+        check(getParam(PP::ADSRON) == 0.0f, "ADSR off by default");
+        check(getParam(PP::FTON) == 0.0f, "filter off by default");
+        check(getParam(PP::LFOON) == 0.0f, "LFO off by default");
+        check(getParam(PP::CHON) == 0.0f && getParam(PP::PHON) == 0.0f
+            && getParam(PP::FLON) == 0.0f && getParam(PP::DION) == 0.0f
+            && getParam(PP::SAON) == 0.0f && getParam(PP::RVON) == 0.0f
+            && getParam(PP::DLON) == 0.0f, "FX off by default");
+        check(std::abs(getParam(PP::VOLUME) - 0.5f) < 0.001f, "master -6 dB by default");
+        auto dryd = tmp.getChildFile("dry");
+        dryd.createDirectory();
+        writeTone(dryd.getChildFile("t.wav"), 440.0f);
+        dryd.getChildFile("d.sfz").replaceWithText(
+            "<region> sample=t.wav key=60 pitch_keycenter=60\n");
+        juce::String err;
+        check(proc.loadSoundFile(dryd.getChildFile("d.sfz").getFullPathName(), err), "dry fixture loads");
+        float rDry = 0; renderNote(60, 12, rDry);
+        check(rDry > 0.05f, "dry path renders full level");
+        setP(PP::FTON, 1.0f); setP(PP::FCUT, 0.0f); // cutoff to 40 Hz minimum
+        float rDark = 0; renderNote(60, 12, rDark);
+        check(rDark < rDry * 0.3f, "filter toggle engages the filter");
+        setP(PP::FTON, 0.0f); setP(PP::FCUT, 1.0f);
+        float rDry2 = 0; renderNote(60, 12, rDry2);
+        check(std::abs(rDry2 / juce::jmax(rDry, 1e-6f) - 1.0f) < 0.15f,
+              "filter toggle restores the dry path");
+        setP(PP::ADSRON, 1.0f); setP(PP::SUS, 0.0f);
+        float rAdsr = 0; renderNote(60, 12, rAdsr);
+        check(rAdsr < rDry * 0.3f, "ADSR toggle engages the UI envelope");
+        setP(PP::ADSRON, 0.0f); setP(PP::SUS, 0.8f); // restore defaults
+        proc.panic();
+    }
+
     // articulation isolation: choke groups and round-robins are scoped per
     // articulation, so an active articulation behaves like its file alone
     {
@@ -1586,12 +1649,14 @@ int main(int argc, char** argv)
     }
 
     {
+        proc.apvts.getParameter(PP::FTON)->setValueNotifyingHost(1.0f);
         proc.apvts.getParameter(PP::FCUT)->setValueNotifyingHost(0.0f);
         float rms = 0.0f; renderNote(60, 12, rms);
         juce::Logger::writeToLog("filtered rms: " + juce::String(rms));
         check(rms < 0.05f, "lowpass at 40Hz kills 440Hz tone");
         auto* p = proc.apvts.getParameter(PP::FCUT);
         p->setValueNotifyingHost(p->convertTo0to1(18000.0f));
+        proc.apvts.getParameter(PP::FTON)->setValueNotifyingHost(0.0f);
     }
 
     const char* fxIds[] = { PP::CHON, PP::PHON, PP::FLON, PP::DION, PP::SAON, PP::RVON, PP::DLON };

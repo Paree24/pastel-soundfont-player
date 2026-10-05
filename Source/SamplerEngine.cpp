@@ -42,6 +42,18 @@ void SamplerEngine::setEnvelope(float a, float d, float s, float r)
     envR = juce::jmax(0.005f, r);
 }
 
+void SamplerEngine::setAdsrEnabled(bool on)
+{
+    juce::ScopedLock sl(lock);
+    adsrOn = on;
+}
+
+bool SamplerEngine::isAdsrEnabled() const
+{
+    juce::ScopedLock sl(lock);
+    return adsrOn;
+}
+
 juce::String SamplerEngine::currentName() const
 {
     if (currentFile.isEmpty()) return "No file loaded";
@@ -634,11 +646,9 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
     t = stripComments(t);
 
     // set_ccN initial CC values are GLOBAL (sfizz strategy: textual include,
-    // last one wins in stream order). They init live CC state (locc/hicc
-    // gates evaluate per trigger) and fold static gain_cc/cutoff_cc. The old
-    // per-file scoping starved included patches of the master's knob init
-    // (e.g. Interval CC27=82), so every Slide_In_2ST..8ST variant fired at
-    // once instead of the one its range selects.
+    // last one wins in stream order). They init live CC state at load;
+    // locc/hicc gates, gain_cc/volume_oncc depths and cutoff_cc depths all
+    // evaluate against live CCs per trigger (setCC/MIDI CC).
     auto scanSetCC = [](const juce::String& txt)
     {
         std::map<int,int> out;
@@ -769,19 +779,18 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
         else if (key == "fil_veltrack") { tgt.hasFilter = true; tgt.filVeltrack = val.getFloatValue(); }
         else if (key.startsWith("cutoff_cc"))
         {
+            // last opcode wins per CC (sfizz connection overwrite); different
+            // CCs stack. Evaluated live at voice start (see startVoice).
             tgt.hasFilter = true;
-            auto it = ccDefaults.find(key.substring(9).getIntValue());
-            int ccVal = it == ccDefaults.end() ? 0 : it->second;
-            tgt.filtCcCents += val.getFloatValue() * ccVal / 127.0f;
+            tgt.filtCcDepth[key.substring(9).getIntValue()] = val.getFloatValue();
         }
         else if (key.startsWith("gain_cc") || key.startsWith("volume_oncc"))
         {
-            // static CC gain at the set_cc default, e.g. gain_cc30=38 @ 75
-            juce::String num = key.startsWith("gain_cc")
-                ? key.substring(7) : key.substring(11);
-            auto it = ccDefaults.find(num.getIntValue());
-            int ccVal = it == ccDefaults.end() ? 0 : it->second;
-            tgt.ccGainDb += val.getFloatValue() * ccVal / 127.0f;
+            // last opcode wins per CC (sfizz connection overwrite); different
+            // CCs stack. Evaluated live at voice start (see startVoice).
+            int cc = key.startsWith("gain_cc")
+                ? key.substring(7).getIntValue() : key.substring(11).getIntValue();
+            tgt.ccGainDepth[cc] = val.getFloatValue();
         }
         else if (key == "keyswitch") tgt.keyswitch = sfzNoteValue(val, -1);
         else if (key == "sw_lokey") tgt.swLo = sfzNoteValue(val, -1);
@@ -1197,8 +1206,9 @@ void SamplerEngine::noteOn(int midiNote, float velocity01)
     {
         tsf_channel_note_on(soundfont, 0, midiNote, juce::jmax(0.01f, vel));
         // retrigger when idle: the gate may have been released by an
-        // earlier all-notes-off while no new note arrived since
-        if (!sf2EgGate || !sf2MasterEg.isActive()) { sf2MasterEg.noteOn(); sf2EgGate = true; }
+        // earlier all-notes-off while no new note arrived since.
+        // UI-ADSR-gated only: toggle off = raw soundfont voice.
+        if (adsrOn && (!sf2EgGate || !sf2MasterEg.isActive())) { sf2MasterEg.noteOn(); sf2EgGate = true; }
         return;
     }
     if (!loaded || regions.empty()) return;
@@ -1282,7 +1292,17 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool from
     vp->startSamp = start;
     vp->stopSamp = stop;
     vp->pos = vp->dir > 0 ? (double) start : (double)(stop - 1);
-    float volGain = juce::Decibels::decibelsToGain(r.volumeDb + r.ccGainDb);
+    // CC-modulated gain, evaluated LIVE per voice (sfizz strategy): each CC
+    // contributes depth * liveValue / 127 dB. Repeated gain_cc lines for the
+    // same CC collapsed to one depth at parse (last wins), so restated
+    // <global> blocks can't stack into triple-digit dB.
+    float ccDb = 0.0f;
+    for (auto& kv : r.ccGainDepth)
+    {
+        int cv = (kv.first >= 0 && kv.first < 128) ? ccState[kv.first] : 0;
+        ccDb += kv.second * (float) cv / 127.0f;
+    }
+    float volGain = juce::Decibels::decibelsToGain(r.volumeDb + ccDb);
     // velocity law (sfizz strategy): squared curve blended by amp_veltrack
     float vt = juce::jlimit(-1.0f, 1.0f, r.ampVelTrack);
     float vg = vel * vel;
@@ -1293,17 +1313,25 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool from
         g *= juce::Decibels::decibelsToGain(r.ampRandomDb * (rng.nextFloat() * 2.0f - 1.0f));
     vp->gainL = g * std::cos(r.pan * juce::MathConstants<float>::halfPi);
     vp->gainR = g * std::sin(r.pan * juce::MathConstants<float>::halfPi);
-    // Regionauthored amplitude EG wins when the patch defines one
-    // (e.g. plucky ampeg_sustain=0.1); otherwise the UI ADSR applies.
-    if (r.hasAmpEg) vp->env.setParams(r.ampA, r.ampD, r.ampS, r.ampR);
-    else vp->env.setParams(envA, envD, envS, envR);
+    // Amplitude EG: UI ADSR when its toggle is on; otherwise the soundfont
+    // plays as authored (region ampeg_*), falling back to a neutral gate
+    // (2 ms de-click attack, full sustain, 8 ms release) for plain regions.
+    if (adsrOn) vp->env.setParams(envA, envD, envS, envR);
+    else if (r.hasAmpEg) vp->env.setParams(r.ampA, r.ampD, r.ampS, r.ampR);
+    else vp->env.setParams(0.002f, 0.0f, 1.0f, 0.008f);
     // Static region filter evaluated at note-on (velocity/key/CC folded in
     // as cents; no per-sample modulation by design).
     vp->filtOn = r.hasFilter;
     if (r.hasFilter)
     {
+        float ccCents = 0.0f;
+        for (auto& kv : r.filtCcDepth)
+        {
+            int cv = (kv.first >= 0 && kv.first < 128) ? ccState[kv.first] : 0;
+            ccCents += kv.second * (float) cv / 127.0f;
+        }
         float cents = r.filKeytrack * ((float) midiNote - 60.0f)
-                    + r.filVeltrack * vel + r.filtCcCents;
+                    + r.filVeltrack * vel + ccCents;
         vp->cutHz = juce::jlimit(30.0f, 19000.0f,
             r.filtCut * std::pow(2.0f, cents / 1200.0f));
         vp->filtType = r.filtType;
@@ -1385,11 +1413,11 @@ void SamplerEngine::renderAdding(float* destL, float* destR, int numSamples)
         size_t need = (size_t) numSamples * 2;
         if (tsfTemp.size() < need) tsfTemp.resize(need);
         tsf_render_float(soundfont, tsfTemp.data(), numSamples, 0);
-        bool egActive = sf2MasterEg.isActive();
+        bool egActive = adsrOn && sf2MasterEg.isActive();
         for (int i = 0; i < numSamples; ++i)
         {
             float eg = 1.0f;
-            if (sf2EgGate || egActive) { eg = sf2MasterEg.next(); egActive = sf2MasterEg.isActive(); }
+            if (adsrOn && (sf2EgGate || egActive)) { eg = sf2MasterEg.next(); egActive = sf2MasterEg.isActive(); }
             destL[i] += tsfTemp[(size_t) i * 2] * eg;
             destR[i] += tsfTemp[(size_t) i * 2 + 1] * eg;
         }

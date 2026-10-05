@@ -267,6 +267,12 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     // master mono (after arp so switch indices above stay stable)
     addSwitch(PP::MONO, "Mono");
 
+    // mid-column group toggles: ADSR / Filter / LFO (indices 11,12,13).
+    // All default off: the soundfont plays as authored until engaged.
+    addSwitch(PP::ADSRON, "ADSR On");
+    addSwitch(PP::FTON, "Filter On");
+    addSwitch(PP::LFOON, "LFO On");
+
     // master switch captions (switches themselves stay textless)
     for (auto* cap : { &limCap, &monoCap })
     {
@@ -448,6 +454,10 @@ void PastelEditor::resized()
     envGroup.setBounds(mx, top, midW, envH);
     filterGroup.setBounds(mx, top + envH + 8, midW, filtH);
     lfoGroup.setBounds(mx, top + envH + 8 + filtH + 8, midW, lfoH);
+    // group toggles, top-right inside each group box (FX cards do the same)
+    switches[11]->b->setBounds(mx + midW - 58, top + 2, 46, 20);
+    switches[12]->b->setBounds(mx + midW - 58, top + envH + 8 + 2, 46, 20);
+    switches[13]->b->setBounds(mx + midW - 58, top + envH + 8 + filtH + 8 + 2, 46, 20);
 
     // env knobs 0..3 in one row
     {
@@ -540,7 +550,8 @@ void PastelEditor::resized()
     // knobs: 0-3 env, 4-6 filter, 7-8 lfo, 9-11 chorus, 12-15 phaser,
     //   16-19 flanger, 20-21 distortion, 22-23 saturation, 24-26 reverb,
     //   27-29 delay, 30 master-vol, 31-32 arp(oct,gate)
-    // switches: 0 ch,1 ph,2 fl,3 di,4 sa,5 rv,6 dl,7 dlsync,8 limit,9 arp,10 mono
+    // switches: 0 ch,1 ph,2 fl,3 di,4 sa,5 rv,6 dl,7 dlsync,8 limit,9 arp,10 mono,
+    //   11 adsr,12 filter,13 lfo (mid-column group toggles)
     // choices: 0 ftype,1 fslope,2 lfowave,3 chmode,4 samode,5 dldiv,6 arpmode,7 arpdiv
     size_t K = 9, S = 0;
     for (int card = 0; card < 8 && card < fxCards.size(); ++card)

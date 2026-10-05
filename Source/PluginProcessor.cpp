@@ -258,8 +258,10 @@ DspParams PastelProcessor::collectParams()
     };
     auto getInt = [&](const char* id) -> int { return (int) get(id); };
 
+    p.fOn = get(PP::FTON) > 0.5f;
     p.fType = getInt(PP::FTYPE); p.fCut = get(PP::FCUT); p.fRes = get(PP::FRES);
     p.fDrive = get(PP::FDRIVE); p.fSlope = getInt(PP::FSLOPE);
+    p.lfoOn = get(PP::LFOON) > 0.5f;
     p.lfoRate = get(PP::LFORATE); p.lfoDepth = get(PP::LFODEPTH); p.lfoWave = getInt(PP::LFOWAVE);
     p.chOn = get(PP::CHON) > 0.5f; p.chMode = getInt(PP::CHMODE);
     p.chRate = get(PP::CHRATE); p.chDepth = get(PP::CHDEPTH); p.chMix = get(PP::CHMIX);
@@ -445,6 +447,8 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         sampler.setEnvelope(a, d, s, r);
         lastA = a; lastD = d; lastS = s; lastR = r;
     }
+    bool adsrOn = apvts.getRawParameterValue(PP::ADSRON)->load() > 0.5f;
+    if (adsrOn != lastAdsrOn) { sampler.setAdsrEnabled(adsrOn); lastAdsrOn = adsrOn; }
     int bank = (int) apvts.getRawParameterValue(PP::BANK)->load();
     int preset = (int) apvts.getRawParameterValue(PP::PRESET)->load();
     if ((bank != lastBank || preset != lastPreset) && sampler.isLoaded() && sampler.isSf2())

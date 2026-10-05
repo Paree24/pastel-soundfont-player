@@ -29,18 +29,21 @@ APVTS::ParameterLayout createParameterLayout()
     // program
     p.push_back(floatParam(PP::PRESET, "Preset", 0, 127, 0));
     p.push_back(floatParam(PP::BANK, "Bank", 0, 127, 0));
-    // ADSR
+    // ADSR (off by default: the soundfont plays as authored)
+    p.push_back(boolParam(PP::ADSRON, "ADSR On", false));
     p.push_back(floatParam(PP::ATK, "Attack", 0.001f, 4.0f, 0.01f, "s"));
     p.push_back(floatParam(PP::DEC, "Decay", 0.005f, 4.0f, 0.25f, "s"));
     p.push_back(floatParam(PP::SUS, "Sustain", 0.0f, 1.0f, 0.8f));
     p.push_back(floatParam(PP::REL, "Release", 0.01f, 8.0f, 0.35f, "s"));
-    // filter
+    // filter (off by default: dry soundfont signal)
+    p.push_back(boolParam(PP::FTON, "Filter On", false));
     p.push_back(choiceParam(PP::FTYPE, "Filter Type", { "Low Pass", "High Pass", "Band Pass" }, 0));
     p.push_back(floatParam(PP::FCUT, "Cutoff", 40.0f, 18000.0f, 18000.0f, "Hz"));
     p.push_back(floatParam(PP::FRES, "Resonance", 0.0f, 1.0f, 0.15f));
     p.push_back(floatParam(PP::FDRIVE, "Drive", 0.0f, 1.0f, 0.0f));
     p.push_back(choiceParam(PP::FSLOPE, "Slope", { "6 dB", "12 dB", "24 dB", "48 dB" }, 1));
-    // lfo
+    // lfo (off by default)
+    p.push_back(boolParam(PP::LFOON, "LFO On", false));
     p.push_back(floatParam(PP::LFORATE, "LFO Rate", 0.05f, 20.0f, 2.0f, "Hz"));
     p.push_back(floatParam(PP::LFODEPTH, "LFO Depth", 0.0f, 1.0f, 0.0f));
     p.push_back(choiceParam(PP::LFOWAVE, "LFO Wave", { "Sine", "Triangle", "Saw", "Square", "S&H" }, 0));
@@ -84,8 +87,8 @@ APVTS::ParameterLayout createParameterLayout()
     p.push_back(boolParam(PP::DLSYNC, "Delay Sync", false));
     p.push_back(choiceParam(PP::DLDIV, "Delay Division",
         { "1/4", "1/8", "1/8 Dotted", "1/4 Triplet", "1/16", "1/2" }, 1));
-    // master
-    p.push_back(floatParam(PP::VOLUME, "Volume", 0.0f, 1.25f, 0.8f));
+    // master (-6 dB default headroom: hot libraries peak near 0 dBFS voiced raw)
+    p.push_back(floatParam(PP::VOLUME, "Volume", 0.0f, 1.25f, 0.5f));
     p.push_back(boolParam(PP::LIMIT, "Limiter", true));
     p.push_back(boolParam(PP::MONO, "Mono", false));
     // arp

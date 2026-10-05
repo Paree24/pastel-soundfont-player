@@ -104,6 +104,11 @@ public:
 
     void setSampleRate(double sr);
     void setEnvelope(float a, float d, float s, float r);
+    // UI ADSR engaged (default OFF): ON = UI ADSR voices every note;
+    // OFF = the soundfont plays as authored (region ampeg_* where present,
+    // else a neutral gate). Lock-protected.
+    void setAdsrEnabled(bool on);
+    bool isAdsrEnabled() const;
     // Live MIDI CC value (sfizz MidiState): loccN/hiccN gates evaluate per
     // trigger against this. Lock-protected, audio thread safe.
     void setCC(int cc, int value);
@@ -172,19 +177,22 @@ private:
         float delaySec = 0.0f;
         float ampRandomDb = 0.0f;  // amp_random: ±dB humanization per hit
         juce::int64 offsetRandom = 0; // offset_random: +0..N samples start jitter
-        float ccGainDb = 0.0f;  // static gain_ccN/volume_onccN at set_cc defaults
+        // Per-CC gain depths (gain_ccN/volume_onccN): LAST opcode wins per CC
+        // (sfizz: same target+CC overwrites its connection). Summing repeats
+        // stacked +30 dB per restated line — Metal GTX restates gain_cc30=50
+        // in 8 <global> blocks, which voice-stacked into +195 dB noise.
+        std::map<int,float> ccGainDepth;
         bool hasAmpEg = false;  // any ampeg_* in scope: use region EG, not the UI ADSR
         float ampA = 0.005f, ampD = 0.0f, ampS = 1.0f, ampR = 0.005f;
-        // per-region filter (static note-on evaluation; dynamic CC/EG swept
-        // cutoffs are out of scope). Absent entirely => bypass (no behavior
-        // change for simple banks).
+        // per-region filter (note-on evaluation; CC depths follow live CCs).
+        // Absent entirely => bypass (no behavior change for simple banks).
         bool hasFilter = false;
         float filtCut = 19000.0f; // Hz base
         int filtType = 0;         // 0 LP 1 HP 2 BP
         float filtRes = 0.0f;     // 0..1 (from resonance dB / 40)
         float filKeytrack = 0.0f; // cents per key above MIDI 60
         float filVeltrack = 0.0f; // cents added at velocity 1
-        float filtCcCents = 0.0f; // static cutoff_ccN at set_cc defaults
+        std::map<int,float> filtCcDepth; // cutoff_ccN depths: last wins per CC (sfizz)
     };
 
     struct Voice
@@ -252,6 +260,7 @@ private:
     Voice voices[maxVoices];
     juce::uint32 voiceCounter = 0;
     float envA = 0.01f, envD = 0.25f, envS = 0.8f, envR = 0.35f;
+    bool adsrOn = false; // UI ADSR engaged (default off: soundfont as authored)
     double hostRate = 44100.0;
 
     // SF2 global EG (tsf owns its voices, so ADSR shapes the sum)
