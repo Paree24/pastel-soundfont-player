@@ -145,17 +145,17 @@ void SamplerEngine::unloadInternal()
     regions.clear();
     sampleBuffers.clear();
     delayed.clear();
-    seqCounters.clear();
     localIndex.clear();
     localPaths.clear();
     swLastKeys.clear();
     swLabels.clear();
     samplePaths.clear();
     for (int i = 0; i < 128; ++i) lastVel[i] = 0;
+    for (int i = 0; i < 128; ++i) ccState[i] = 0;
     if (soundfont != nullptr) { tsf_close(soundfont); soundfont = nullptr; }
     sf2EgGate = false;
     sf2MasterEg.reset();
-    lastKeyswitch = -1; swLastDefault = -1;
+    lastKeyswitch = -1;
     loaded = false; loadedSf2 = false; currentFile = "";
 }
 
@@ -435,10 +435,9 @@ void SamplerEngine::swapWith(SamplerEngine& other)
     localPaths.swap(other.localPaths);
     std::swap(searchCapped, other.searchCapped);
     std::swap(lastKeyswitch, other.lastKeyswitch);
-    std::swap(swLastDefault, other.swLastDefault);
     swLastKeys.swap(other.swLastKeys);
     swLabels.swap(other.swLabels);
-    seqCounters.swap(other.seqCounters);
+    for (int i = 0; i < 128; ++i) std::swap(ccState[i], other.ccState[i]);
     for (int i = 0; i < 128; ++i) std::swap(lastVel[i], other.lastVel[i]);
     delayed.swap(other.delayed);
 }
@@ -634,12 +633,12 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
     }
     t = stripComments(t);
 
-    // set_ccN defaults, scoped PER FILE (segments split at #newfile): needed
-    // to evaluate gain_ccN / volume_onccN / locc / cutoff_cc as static values.
-    // set_cc appears in top files (knob init) but basically never inside the
-    // included patch files, which are voiced standalone at CC defaults (0).
-    // Leaking the top file's values into 150 includes voiced everything
-    // ~22 dB hot and broke standalone/bank balance equivalence.
+    // set_ccN initial CC values are GLOBAL (sfizz strategy: textual include,
+    // last one wins in stream order). They init live CC state (locc/hicc
+    // gates evaluate per trigger) and fold static gain_cc/cutoff_cc. The old
+    // per-file scoping starved included patches of the master's knob init
+    // (e.g. Interval CC27=82), so every Slide_In_2ST..8ST variant fired at
+    // once instead of the one its range selects.
     auto scanSetCC = [](const juce::String& txt)
     {
         std::map<int,int> out;
@@ -671,8 +670,8 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
         }
         segCC.push_back(scanSetCC(cur));
     }
-    std::map<int,int> ccDefaults = segCC.empty() ? std::map<int,int>() : segCC[0];
-    int segIdx = 0;
+    std::map<int,int> ccDefaults;
+    for (auto& m : segCC) for (auto& kv : m) ccDefaults[kv.first] = kv.second;
 
     SfzRegion groupDefaults;
     SfzRegion cur = groupDefaults;
@@ -685,7 +684,8 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
     bool inGroup = false;
     std::set<int> swLastAll;
     juce::String defaultPath; // from <control> default_path=
-    int swLastParsed = -1, firstSwLast = -1;
+    int swLastParsed = -1;
+    int swDefaultParsed = -1; // sw_default (any scope): initial switch, last wins (sfizz)
     struct Pending { SfzRegion r; juce::String sample; juce::String baseDir; };
     std::vector<Pending> pendings;
     cur = groupDefaults;
@@ -736,14 +736,13 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
         {
             bool lo = key.startsWith("locc");
             int cc = key.substring(4).getIntValue();
-            if (cc > 0)
+            if (cc >= 0 && cc < 128)
             {
-                if (tgt.ccNum < 0) { tgt.ccNum = cc; tgt.loCC = 0; tgt.hiCC = 127; }
-                if (tgt.ccNum == cc)
-                {
-                    if (lo) tgt.loCC = juce::jlimit(0, 127, val.getIntValue());
-                    else tgt.hiCC = juce::jlimit(0, 127, val.getIntValue());
-                }
+                SfzRegion::CCGate* g = nullptr;
+                for (auto& e : tgt.ccGates) if (e.cc == cc) { g = &e; break; }
+                if (g == nullptr) { tgt.ccGates.push_back({}); g = &tgt.ccGates.back(); g->cc = cc; }
+                if (lo) g->lo = juce::jlimit(0, 127, val.getIntValue());
+                else g->hi = juce::jlimit(0, 127, val.getIntValue());
             }
         }
         else if (key == "lorand") tgt.loRand = juce::jlimit(0, 127, val.getIntValue());
@@ -752,6 +751,7 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
         else if (key == "amp_random") tgt.ampRandomDb = juce::jlimit(0.0f, 24.0f, std::abs(val.getFloatValue()));
         else if (key == "offset_random") tgt.offsetRandom = juce::jmax((juce::int64) 0, val.getLargeIntValue());
         else if (key == "sw_down") tgt.swDown = sfzNoteValue(val, -1);
+        else if (key == "sw_default") swDefaultParsed = sfzNoteValue(val, -1);
         else if (key == "sw_label") tgt.swLabel = val.trim().removeCharacters("\"").substring(0, 48);
         else if (key == "ampeg_attack") { tgt.hasAmpEg = true; tgt.ampA = juce::jmax(0.0f, val.getFloatValue()); }
         else if (key == "ampeg_decay") { tgt.hasAmpEg = true; tgt.ampD = juce::jmax(0.0f, val.getFloatValue()); }
@@ -791,11 +791,7 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
             int k = sfzNoteValue(val, -1);
             swLastOut = k;
             tgt.swLastReq = k; // region articulation requirement (flows via scope)
-            if (k >= 0)
-            {
-                swLastAll.insert(k);
-                if (firstSwLast < 0) firstSwLast = k; // first in patch = default articulation
-            }
+            if (k >= 0) swLastAll.insert(k);
         }
     };
     // Path-aware tokenizer: sample=/default_path= values may contain spaces,
@@ -898,7 +894,6 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
                 else if (tr.startsWith("#newfile"))
                 {
                     flushAcc(); commitRegion(); resetScope();
-                    if (segIdx + 1 < (int) segCC.size()) ccDefaults = segCC[++segIdx];
                 }
                 else if (!tr.startsWith("#")) acc += ln + "\n";
                 // other #directives dropped
@@ -924,7 +919,7 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
     commitRegion();
 
     int regionCount = (int) pendings.size();
-    int missingCount = 0, gatedCount = 0;
+    int missingCount = 0;
     juce::String firstMissing, firstTried;
     // Single bounded walk of this sfz subtree per load (not per region).
     // Per-region walks here were the Metal-GTX hang: 9000 regions x disk walk.
@@ -956,18 +951,6 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
             }
         }
         if (pr.sample.isEmpty()) { ++missingCount; continue; }
-        // CC-gated layers (loccN/hiccN) evaluated at set_cc defaults:
-        // gated-off layers are skipped, not errors (e.g. resonance @ CC29=0)
-        if (pr.r.ccNum > 0)
-        {
-            auto ccit = ccDefaults.find(pr.r.ccNum);
-            if (ccit != ccDefaults.end()
-                && (ccit->second < pr.r.loCC || ccit->second > pr.r.hiCC))
-            {
-                ++gatedCount;
-                continue;
-            }
-        }
         juce::String tried;
         juce::File base = pr.baseDir.isNotEmpty() ? juce::File(pr.baseDir) : sfzDir;
         if (!base.isDirectory()) base = sfzDir;
@@ -1008,12 +991,15 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
         if (pr.r.swHi >= 0 && pr.r.swLo < 0) pr.r.swLo = pr.r.swHi;
         regions.push_back(pr.r);
     }
-    swLastDefault = firstSwLast >= 0 ? firstSwLast : swLastParsed;
     swLastKeys = swLastAll;
-    // Strict articulation default: only the first sw_last layer sounds on
-    // load (stacking every layer at once is the wall-of-noise bug). Banks
-    // without sw_last keep play-all (lastKeyswitch < 0 = lenient).
-    lastKeyswitch = firstSwLast;
+    // sfizz strategy: switched layers stay silent until selected; sw_default
+    // (last one wins) selects the bank's default articulation on load
+    // (Metal GTX: f0 Sus_Down). Banks without sw_default start unselected.
+    lastKeyswitch = swDefaultParsed;
+    // live CC state: sfizz inits all CCs to 0, set_cc overrides at load
+    for (int i = 0; i < 128; ++i) ccState[i] = 0;
+    for (auto& kv : ccDefaults)
+        if (kv.first >= 0 && kv.first < 128) ccState[kv.first] = kv.second;
     if (overBudget)
     {
         regions.clear();
@@ -1029,9 +1015,6 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
         if (searchCapped)
             lastLoadDetail += " Search was capped (big/slow folders) —"
                 " add the exact Samples folder as a shortcut for a complete search.";
-        if (gatedCount > 0)
-            lastLoadDetail += " " + juce::String(gatedCount)
-                + " region(s) gated off by CC defaults (locc/hicc).";
         if (firstMissing.isNotEmpty())
             lastLoadDetail += " First missing: '" + firstMissing + "' (tried: " + firstTried + ")."
                 + " Tip: add the folder containing the samples as a shortcut in the Browser.";
@@ -1042,96 +1025,70 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
 }
 
 int SamplerEngine::findRegionIdx(int note, int vel, int wantTrigger, int startAfter,
-                                 int randRoll, bool applySeq) const
+                                 int randRoll) const
 {
-    int r0 = randRoll >= 0 ? randRoll : rng.nextInt(128); // lorand/hirand pick
     for (size_t i = (size_t)(startAfter + 1); i < regions.size(); ++i)
     {
         const auto& r = regions[i];
         if (r.trigger != wantTrigger) continue;
         if (note < r.loKey || note > r.hiKey || vel < r.loVel || vel > r.hiVel) continue;
         if (!switchOk(r)) continue;
-        if (r0 < r.loRand || r0 > r.hiRand) continue;
-        if (applySeq && r.seqLen > 0 && !seqMatches((int) i)) continue;
+        if (!ccOk(r)) continue;
+        if (randRoll >= 0 && (randRoll < r.loRand || randRoll > r.hiRand)) continue;
+        if (r.seqLen > 0)
+        {
+            if (i >= seqGate.size() || !seqGate[i]) continue;
+        }
         return (int) i;
     }
     return -1;
-}
-
-bool SamplerEngine::seqMatches(int regionIdx) const
-{
-    if (regionIdx < 0 || regionIdx >= (int) regions.size()) return false;
-    const auto& r = regions[(size_t) regionIdx];
-    if (r.seqLen <= 0) return true;
-    auto it = seqCounters.find(seqKeyFor(r.group, r));
-    int cur = it == seqCounters.end() ? 1 : it->second;
-    return r.seqPos == cur;
 }
 
 bool SamplerEngine::fireNote(int note, float vel01, int wantTrigger, bool allowDelay, bool advanceSeq)
 {
     float vel = juce::jlimit(0.0f, 1.0f, vel01);
     int r0 = rng.nextInt(128); // one roll per trigger, shared by all candidates
-    int vels[2] = { (int) std::round(vel * 100.0f), 64 };
-    for (int v : vels)
+    int v = (int) std::round(vel * 100.0f);
+    // sfizz strategy: every key+trigger-matching region evaluates its cycle
+    // CHECK-then-advance (post-increment): the first hit plays position 1.
+    // Evaluation happens even for regions filtered out later, so sparse
+    // cycles can never deadlock, and each region rotates independently.
+    seqGate.assign(regions.size(), 1);
+    if (advanceSeq)
     {
-        // pass 1: every candidate ignoring sequence position (positions are
-        // consumed by the trigger event itself, see below)
-        std::vector<int> pre;
-        for (int startAfter = -1, tries = 0; tries < 512; ++tries)
+        for (size_t i = 0; i < regions.size(); ++i)
         {
-            int rIdx = findRegionIdx(note, v, wantTrigger, startAfter, r0, false);
-            if (rIdx < 0) break;
-            pre.push_back(rIdx);
-            startAfter = rIdx;
-        }
-        if (pre.empty()) continue; // try velocity fallback
-        // snapshot current positions, select by snapshot, THEN advance (so
-        // this trigger plays the current position, not the next one).
-        // Advancement happens whether or not a voice starts — otherwise
-        // sparse cycles deadlock after the first hit.
-        std::map<int64_t,int> lens, snap;
-        for (int rIdx : pre)
-        {
-            const auto& r = regions[(size_t) rIdx];
-            if (r.seqLen <= 0) continue;
-            int64_t k = seqKeyFor(r.group, r);
-            if (lens.find(k) == lens.end())
+            auto& r = regions[i];
+            if (r.trigger != wantTrigger) continue;
+            if (note < r.loKey || note > r.hiKey) continue;
+            if (r.seqLen > 0)
             {
-                lens[k] = r.seqLen;
-                auto it = seqCounters.find(k);
-                snap[k] = it == seqCounters.end() ? 1 : it->second;
+                seqGate[i] = ((r.seqCounter % r.seqLen) == (r.seqPos - 1)) ? 1 : 0;
+                r.seqCounter++;
             }
         }
-        std::vector<int> matches;
-        for (int rIdx : pre)
-        {
-            const auto& r = regions[(size_t) rIdx];
-            if (r.seqLen <= 0) { matches.push_back(rIdx); continue; }
-            if (r.seqPos == snap[seqKeyFor(r.group, r)]) matches.push_back(rIdx);
-        }
-        if (advanceSeq)
-            for (auto& gl : lens)
-                seqCounters[gl.first] = snap[gl.first] % gl.second + 1;
-        if (matches.empty()) continue; // position consumed, try velocity fallback
-        // fire everything that remains (layers); unstartable regions fall
-        // through to later matches instead of silencing the note
-        bool any = false;
-        for (int rIdx : matches)
-        {
-            const auto& reg = regions[(size_t) rIdx];
-            if (allowDelay && reg.delaySec > 0.0f)
-            {
-                delayed.push_back({ rIdx, note, vel, wantTrigger, (int)(reg.delaySec * hostRate) });
-                if (delayed.size() > 64) delayed.erase(delayed.begin());
-                any = true;
-                continue;
-            }
-            if (startVoice(rIdx, note, vel)) any = true;
-        }
-        if (any) return true;
     }
-    return false;
+    // fire every fully-matching region (layers); unstartable ones
+    // (offset past EOF, empty sample) fall through to later matches
+    bool any = false;
+    for (int startAfter = -1, tries = 0; tries < 512; ++tries)
+    {
+        int rIdx = findRegionIdx(note, v, wantTrigger, startAfter, r0);
+        if (rIdx < 0) break;
+        const auto& reg = regions[(size_t) rIdx];
+        if (allowDelay && reg.delaySec > 0.0f)
+        {
+            delayed.push_back({ rIdx, note, vel, wantTrigger, (int)(reg.delaySec * hostRate) });
+            if (delayed.size() > 64) delayed.erase(delayed.begin());
+            any = true;
+        }
+        else if (startVoice(rIdx, note, vel, wantTrigger == 0))
+        {
+            any = true;
+        }
+        startAfter = rIdx;
+    }
+    return any;
 }
 
 int SamplerEngine::activeVoiceCount() const
@@ -1155,21 +1112,38 @@ bool SamplerEngine::isSwitchKey(int note) const
 
 bool SamplerEngine::switchOk(const SfzRegion& r) const
 {
-    // Discrete articulation selectors only. The sw_lokey..sw_hikey RANGE
-    // alone never qualifies a key (Metal GTX spans the playing range with
-    // it); only exact keyswitch=/sw_down=/sw_last values select.
-    // Until the first switch press (lastKeyswitch < 0) every sw_last layer
-    // plays, so a freshly loaded bank is never silent; exact keyswitch= /
-    // sw_down= layers stay gated until selected.
+    // sfizz strategy: regions WITHOUT keyswitch selectors always play;
+    // regions WITH them stay silent until their exact switch is pressed.
+    // Discrete selectors only — the sw_lokey..sw_hikey RANGE alone never
+    // qualifies a key (Metal GTX spans the playing range with it).
     if (r.keyswitch >= 0 || r.swDown >= 0)
-        // Fresh banks (nothing pressed yet) play everything: exact gating
-        // only kicks in after the first switch press. Otherwise keyswitch-
-        // gated files load silent with no way to know why.
-        return lastKeyswitch < 0
-            || r.keyswitch == lastKeyswitch || r.swDown == lastKeyswitch;
+        return r.keyswitch == lastKeyswitch || r.swDown == lastKeyswitch;
     if (r.swLastReq >= 0)
-        return lastKeyswitch < 0 || lastKeyswitch == r.swLastReq;
+        return lastKeyswitch == r.swLastReq;
     return true;
+}
+
+bool SamplerEngine::ccOk(const SfzRegion& r) const
+{
+    // sfizz strategy: every loccN/hiccN gate evaluates against live CC state
+    for (auto& g : r.ccGates)
+    {
+        int v = (g.cc >= 0 && g.cc < 128) ? ccState[g.cc] : 0;
+        if (v < g.lo || v > g.hi) return false;
+    }
+    return true;
+}
+
+void SamplerEngine::setCC(int cc, int value)
+{
+    juce::ScopedLock sl(lock);
+    if (cc >= 0 && cc < 128) ccState[cc] = juce::jlimit(0, 127, value);
+}
+
+int SamplerEngine::getCC(int cc) const
+{
+    juce::ScopedLock sl(lock);
+    return (cc >= 0 && cc < 128) ? ccState[cc] : 0;
 }
 
 int SamplerEngine::getLastKeyswitch() const
@@ -1236,7 +1210,7 @@ void SamplerEngine::noteOn(int midiNote, float velocity01)
     fireNote(midiNote, vel, 0, true);
 }
 
-bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel)
+bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool fromNoteOn)
 {
     if (regionIdx < 0 || regionIdx >= (int) regions.size()) return false;
     const auto& r = regions[(size_t) regionIdx];
@@ -1253,35 +1227,35 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel)
     // offset past (near-)EOF: faithful silence, not a 1-sample click
     if (stop <= start + 1) return false;
 
-    // off_by choke, scoped to the killer's own articulation: a release tail
-    // must mute its own articulation's group (1:1 with the individual file),
-    // never ringing voices of other articulations. Without scoping, every
-    // key release muted every held note in banks that share group numbers.
-    // Release-triggered killers are additionally scoped to their own note:
-    // lifting one finger must not mute legato-held neighbours (individual
-    // files contain no cross-note release choking at all). Victims follow
-    // their own off_mode (normal = release stage).
-    if (r.offBy != 0)
+    // off_by choke (sfizz strategy): the VICTIM's off_by must equal the
+    // incoming region's group, and same-note + same-group retriggers never
+    // self-choke. Release-triggered voices are exempt from choking entirely.
+    // Victims follow their own off_mode (normal = release stage).
+    if (fromNoteOn)
     {
-        int64_t killerArt = articulationKey(r.swLastReq, r.keyswitch, r.swDown);
-        bool releaseKiller = (r.trigger == 1);
         for (auto& v : voices)
         {
             if (!v.active || v.region < 0 || v.region >= (int) regions.size()) continue;
+            if (v.trigType != 0) continue; // only attack/CC voices can be choked
             const auto& vr = regions[(size_t) v.region];
-            if (vr.group != r.offBy) continue;
-            if (articulationKey(vr.swLastReq, vr.keyswitch, vr.swDown) != killerArt) continue;
-            if (releaseKiller && v.note != midiNote) continue;
+            if (vr.offBy <= 0 || vr.offBy != r.group) continue;
+            if (vr.group == r.group && v.note == midiNote) continue; // no self-cut
             if (vr.offMode == 1) v.env.choke();
             else if (vr.offMode == 2) v.env.choke(vr.offTime);
             else v.env.noteOff(); // off_mode=normal: release stage, not a cut
         }
     }
 
-    // steal quietest (a cut below audibility beats killing the oldest
-    // still-ringing one-shot); idle slots preferred
+    // steal: free slots first, then oldest releasing voice (sfizz order),
+    // then quietest active as a last resort instead of dropping the note
     Voice* vp = nullptr;
     for (auto& v : voices) if (!v.active) { vp = &v; break; }
+    if (vp == nullptr)
+    {
+        for (auto& v : voices)
+            if (v.env.isReleasing() && (vp == nullptr || v.startedAt < vp->startedAt))
+                vp = &v;
+    }
     if (vp == nullptr)
     {
         vp = &voices[0];
@@ -1301,6 +1275,7 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel)
     else vp->ratio = tuneF * (r.sampleRate / hostRate);
     vp->region = regionIdx;
     vp->note = midiNote;
+    vp->trigType = fromNoteOn ? 0 : 1;
     vp->vel = vel;
     vp->group = r.group;
     vp->dir = r.direction != 0 ? -1 : 1;
@@ -1308,8 +1283,12 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel)
     vp->stopSamp = stop;
     vp->pos = vp->dir > 0 ? (double) start : (double)(stop - 1);
     float volGain = juce::Decibels::decibelsToGain(r.volumeDb + r.ccGainDb);
-    float velGain = (1.0f - r.ampVelTrack) + r.ampVelTrack * vel;
-    float g = volGain * (0.25f + 0.75f * velGain);
+    // velocity law (sfizz strategy): squared curve blended by amp_veltrack
+    float vt = juce::jlimit(-1.0f, 1.0f, r.ampVelTrack);
+    float vg = vel * vel;
+    float velGain = std::fabs(vt) * (1.0f - vg);
+    velGain = (vt < 0.0f) ? velGain : (1.0f - velGain);
+    float g = volGain * velGain;
     if (r.ampRandomDb > 0.0f) // ±dB humanization per hit (ARIA amp_random)
         g *= juce::Decibels::decibelsToGain(r.ampRandomDb * (rng.nextFloat() * 2.0f - 1.0f));
     vp->gainL = g * std::cos(r.pan * juce::MathConstants<float>::halfPi);
@@ -1427,7 +1406,7 @@ void SamplerEngine::renderAdding(float* destL, float* destR, int numSamples)
             it->samplesLeft -= numSamples;
             if (it->samplesLeft <= 0)
             {
-                if (!startVoice(it->regionIdx, it->note, it->vel))
+                if (!startVoice(it->regionIdx, it->note, it->vel, it->trigger == 0))
                     fireNote(it->note, it->vel, it->trigger, false, false);
                 it = delayed.erase(it);
             }

@@ -7,15 +7,16 @@
 #include "VoiceFilter.h"
 #include "ThirdParty/tsf.h"
 
-// Exponential RC-style ADSR (ERSA character): snappy attack,
-// smooth analog-like decay/release instead of linear segments.
+// ADSR envelope (sfizz strategy): linear attack, exponential
+// decay/release reaching -80 dB in nominal time (exp(-9)), release
+// floor at 1e-4. Choke uses the 6 ms off-time for off_mode=fast.
 struct EnvADSR
 {
     void setSampleRate(double sr) { sampleRate = sr; }
     void setParams(float a, float d, float s, float r)
     {
-        att = juce::jmax(a, 0.001f); dec = juce::jmax(d, 0.002f);
-        sus = s; rel = juce::jmax(r, 0.005f);
+        att = juce::jmax(a, 0.0f); dec = juce::jmax(d, 0.006f);
+        sus = s; rel = juce::jmax(r, 0.006f);
     }
     void noteOn()
     {
@@ -23,39 +24,37 @@ struct EnvADSR
         state = State::Attack;
     }
     void noteOff() { if (state != State::Idle) { state = State::Release; fast = false; } }
-    void choke(float secs = 0.008f) // fast choke for off_by groups (off_mode=fast/time)
+    void choke(float secs = 0.006f) // fast choke for off_by groups (off_mode=fast/time)
     {
         if (state != State::Idle) { state = State::Release; fast = true; fastSecs = secs; }
     }
     void reset()   { state = State::Idle; level = 0.0f; fast = false; }
     bool isActive() const { return state != State::Idle; }
+    bool isReleasing() const { return state == State::Release; }
     float ampLevel() const { return level; } // current output, for steal decisions
-    // Time constants are true time: each stage settles within its nominal
-    // seconds (exp(-5) ~= 0.7% residual), voices actually die on schedule
-    // instead of smearing 2.5x longer over legato lines.
     inline float next()
     {
         switch (state)
         {
             case State::Idle: return 0.0f;
             case State::Attack: {
-                float ka = 1.0f - std::exp(-5.0f / (att * (float) sampleRate));
-                level += (1.0f - level) * ka;
-                if ((1.0f - level) < 0.005f) state = State::Decay;
+                if (att <= 0.0f) { level = 1.0f; state = State::Decay; return level; }
+                level += 1.0f / (att * (float) sampleRate);
+                if (level >= 1.0f) { level = 1.0f; state = State::Decay; }
                 return level;
             }
             case State::Decay: {
-                float kd = 1.0f - std::exp(-5.0f / (dec * (float) sampleRate));
-                level += (sus - level) * kd;
+                float kd = std::exp(-9.0f / (dec * (float) sampleRate));
+                level = sus + (level - sus) * kd;
                 if (std::fabs(level - sus) < 0.002f) { level = sus; state = State::Sustain; }
                 return level;
             }
             case State::Sustain: level = sus; return sus;
             case State::Release: {
                 float relSecs = fast ? fastSecs : rel;
-                float kr = std::exp(-5.0f / (relSecs * (float) sampleRate));
+                float kr = std::exp(-9.0f / (relSecs * (float) sampleRate));
                 level *= kr;
-                if (level < 0.001f) { level = 0.0f; state = State::Idle; fast = false; return 0.0f; }
+                if (level < 0.0001f) { level = 0.0f; state = State::Idle; fast = false; return 0.0f; }
                 return level;
             }
         }
@@ -67,7 +66,7 @@ private:
     double sampleRate = 44100.0;
     float att = 0.01f, dec = 0.2f, sus = 0.8f, rel = 0.35f, level = 0.0f;
     bool fast = false;
-    float fastSecs = 0.008f;
+    float fastSecs = 0.006f;
 };
 
 // ============================================================
@@ -105,6 +104,10 @@ public:
 
     void setSampleRate(double sr);
     void setEnvelope(float a, float d, float s, float r);
+    // Live MIDI CC value (sfizz MidiState): loccN/hiccN gates evaluate per
+    // trigger against this. Lock-protected, audio thread safe.
+    void setCC(int cc, int value);
+    int getCC(int cc) const;
 
     // extra folders to search when samples aren't next to the .sfz
     // (your library shortcuts). Lock-protected, message thread.
@@ -156,9 +159,15 @@ private:
         int keytrack = 1;       // pitch_keytrack, 0 = fixed pitch
         int group = 0, offBy = 0;
         int offMode = 0;        // 0 normal (release stage) 1 fast 2 timed
-        float offTime = 0.008f; // for off_mode=time
+        float offTime = 0.006f; // for off_mode=time (sfizz Default::offTime)
         int seqLen = 0, seqPos = 1; // round robin (len 0 = off; pos defaults to 1)
-        int loCC = -1, hiCC = -1, ccNum = -1; // loccN/hiccN layer gate (static, via set_cc)
+        int seqCounter = 0;     // sfizz strategy: per-region position, advanced
+                                // on every key-matching trigger
+        // loccN/hiccN layer gates (sfizz strategy): EVERY gate must pass,
+        // evaluated per trigger against live CC state (set_cc = initial).
+        // Multiple CCs per region allowed (e.g. Sus_Long + Sus_P5 stacking).
+        struct CCGate { int cc = 0, lo = 0, hi = 127; };
+        std::vector<CCGate> ccGates;
         int loRand = 0, hiRand = 127;
         float delaySec = 0.0f;
         float ampRandomDb = 0.0f;  // amp_random: ±dB humanization per hit
@@ -190,6 +199,7 @@ private:
         int startSamp = 0;      // playback bounds (inclusive/exclusive)
         int stopSamp = 0;
         int group = 0;
+        int trigType = 0;     // trigger event that started the voice (0 attack, 1 release)
         float gainL = 1.0f, gainR = 1.0f;
         EnvADSR env;
         juce::uint32 startedAt = 0;
@@ -208,21 +218,17 @@ private:
                              const juce::String& raw, juce::String* triedOut = nullptr);
     void ensureLibraryIndex(); // lock must be held
     // region matching + voice start (lock must be held)
-    int findRegionIdx(int note, int vel, int wantTrigger, int startAfter = -1,
-                        int randRoll = -1, bool applySeq = true) const;
-    bool seqMatches(int regionIdx) const; // RR position ok at current counter
-    static int64_t seqKeyFor(int group, const SfzRegion& r)
-    {
-        return ((int64_t) group << 32) | (uint32_t) articulationKey(r.swLastReq, r.keyswitch, r.swDown);
-    }
-    bool startVoice(int regionIdx, int note, float vel);
+    int findRegionIdx(int note, int vel, int wantTrigger, int startAfter, int randRoll) const;
+    bool startVoice(int regionIdx, int note, float vel, bool fromNoteOn);
     // Fire a note: EVERY matching region voices (layers), like the format
     // specifies — first-match-only drops articulation composites. Delay
     // regions queue individually; unstartable ones (offset past EOF, empty
-    // sample) fall through to later matches. Round-robin positions advance
-    // once per trigger event per (group, articulation), whether or not a
-    // voice starts — otherwise sparse cycles deadlock after the first hit.
+    // sample) fall through to later matches. Round-robin is sfizz strategy:
+    // each region owns its cycle, evaluated check-then-advance on every
+    // key+trigger-matching hit (even regions filtered out later), so sparse
+    // cycles can never deadlock and the first hit plays position 1.
     bool fireNote(int note, float vel01, int wantTrigger, bool allowDelay, bool advanceSeq = true);
+    mutable std::vector<char> seqGate; // per-region pass flags for this trigger
     static juce::String loadSfzFileText(const juce::File& f);
     static void expandSfzIncludes(juce::String& text, const juce::File& dir,
                                   int depth, juce::StringArray& visited);
@@ -269,24 +275,15 @@ private:
     std::vector<std::pair<juce::String, juce::String>> localPaths; // (lowerFull, full)
     bool searchCapped = false; // library index hit a budget/timeout (see error text)
 
-    // keyswitch state (sfz); -1 = none pressed yet (all articulations play)
+    // keyswitch state (sfz); -1 = none pressed yet. sfizz strategy: switched
+    // layers stay silent until selected (sw_default = initial selection).
     int lastKeyswitch = -1;
-    int swLastDefault = -1; // from sw_last opcode (last seen; init value)
     std::set<int> swLastKeys; // every sw_last key across the patch (all are switches)
     std::map<int, juce::String> swLabels; // switch key -> sw_label articulation name
     bool isSwitchKey(int note) const;
     bool switchOk(const SfzRegion& r) const;
-    // round-robin positions, keyed by (group, articulation): each
-    // articulation cycles independently, exactly as if its file were loaded
-    // alone (a shared counter desyncs every articulation after any switch)
-    std::map<int64_t,int> seqCounters;
-    static int64_t articulationKey(int swLastReq, int keyswitch, int swDown)
-    {
-        if (swLastReq >= 0) return (int64_t)(swLastReq + 1);
-        if (keyswitch >= 0) return (int64_t)(1000 + keyswitch);
-        if (swDown >= 0) return (int64_t)(2000 + swDown);
-        return 0;
-    }
+    bool ccOk(const SfzRegion& r) const; // every loccN/hiccN gate passes live CC
+    int ccState[128] = {}; // live CC values (sfizz: init 0, set_cc overrides)
     mutable juce::Random rng;
     int lastVel[128] = { 0 };
     struct DelayedNote { int regionIdx; int note; float vel; int trigger; int samplesLeft; };

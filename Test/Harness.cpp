@@ -618,8 +618,8 @@ int main(int argc, char** argv)
 
     // Cross-file scope isolation: opcodes (esp. accumulating gain_cc and
     // trigger=release) must not leak from one #included file into later ones.
-    // set_cc is per-file: the top file's knob init must not voice included
-    // files hotter (standalone/bank balance equivalence).
+    // set_cc is GLOBAL (sfizz: textual include, last wins): the top file's
+    // knob init voices every file, including ones without their own set_cc.
     {
         auto iso = tmp.getChildFile("iso");
         iso.createDirectory();
@@ -652,7 +652,8 @@ int main(int argc, char** argv)
             + " rC(no set_cc)=" + juce::String(rC));
         check(rA > 0.001f && std::abs(rB / juce::jmax(rA, 1e-6f) - 1.0f) < 0.15f,
               "no cross-file gain_cc accumulation");
-        check(rC > 0.001f && rC < rA * 0.6f, "set_cc does not leak across files");
+        check(rC > 0.001f && std::abs(rC / juce::jmax(rA, 1e-6f) - 1.0f) < 0.15f,
+              "set_cc is global: top-file init voices files without set_cc");
         {
             juce::String err2;
             proc.loadSoundFile(sfzFile.getFullPathName(), err2);
@@ -700,6 +701,10 @@ int main(int argc, char** argv)
         check(secs < 20.0f, "large library loads without walk storm");
         float rr = 0;
         {
+            // sfizz semantics: sw_last layers stay silent until selected —
+            // press the g0 switch (MIDI 19) first, like a player would
+            proc.auditionNoteOn(19, 0.8f);
+            proc.auditionNoteOff(19);
             juce::MidiBuffer midiB;
             midiB.addEvent(juce::MidiMessage::noteOn(1, 40, 0.9f), 0);
             juce::AudioBuffer<float> bufB(2, 512);
@@ -1249,12 +1254,13 @@ int main(int argc, char** argv)
             proc.panic();
             return std::make_pair(std::abs(c220), std::abs(c330));
         };
-        auto hDef = corrAt(50);
-        check(hDef.first > 2.0 * hDef.second, "default = first sw_last articulation only");
+        auto hDef = corrAt(50); // fresh load, no sw_default: must be silent (sfizz)
         proc.auditionNoteOn(20, 0.8f);
         proc.auditionNoteOff(20);
         check(proc.getLastKeyswitch() == 20, "switch press selects articulation");
         auto hA = corrAt(50);
+        check(hDef.first + hDef.second < 0.05 * (hA.first + hA.second),
+              "fresh bank silent until first switch (sfizz)");
         check(hA.first > 2.0 * hA.second, "selected articulation sounds after switch");
         proc.auditionNoteOn(21, 0.8f);
         proc.auditionNoteOff(21);
@@ -1445,6 +1451,59 @@ int main(int argc, char** argv)
             juce::String err2;
             proc.loadSoundFile(sfzFile.getFullPathName(), err2);
         }
+    }
+
+    // CC-gated sub-layers (sfizz strategy): loccN/hiccN gates evaluate per
+    // trigger against live CC state. Same-switch variants with disjoint
+    // ranges must never stack (Metal GTX Slide_In_2ST..8ST on CC27).
+    {
+        auto ccg = tmp.getChildFile("ccg");
+        ccg.createDirectory();
+        writeTone(ccg.getChildFile("a.wav"), 220.0f);
+        writeTone(ccg.getChildFile("b.wav"), 330.0f);
+        ccg.getChildFile("c.sfz").replaceWithText(
+            "<control> set_cc27=0\n"
+            "<group> sw_last=20 sw_label=Low locc27=0 hicc27=15\n"
+            "<region> sample=a.wav key=50 pitch_keycenter=50\n"
+            "<group> sw_last=20 sw_label=Low locc27=80 hicc27=95\n"
+            "<region> sample=b.wav key=50 pitch_keycenter=50\n");
+        juce::String err;
+        check(proc.loadSoundFile(ccg.getChildFile("c.sfz").getFullPathName(), err), "ccg loads");
+        auto vf = [&]()
+        {
+            for (int v = 0; v < 64; ++v)
+            {
+                auto p = proc.getVoiceSamplePath(v);
+                if (p.isNotEmpty()) return juce::File(p).getFileName();
+            }
+            return juce::String("(none)");
+        };
+        auto hit = [&](int note)
+        {
+            juce::MidiBuffer m;
+            m.addEvent(juce::MidiMessage::noteOn(1, note, 0.9f), 0);
+            juce::AudioBuffer<float> b(2, 512);
+            b.clear();
+            proc.processBlock(b, m);
+            for (int i = 0; i < 4; ++i) { b.clear(); juce::MidiBuffer e; proc.processBlock(b, e); }
+        };
+        proc.auditionNoteOn(20, 0.8f);
+        proc.auditionNoteOff(20);
+        hit(50);
+        juce::String fLo = vf();
+        proc.panic();
+        check(fLo.contains("a.wav"), "CC default selects the in-range variant only");
+        proc.setCC(27, 82);
+        hit(50);
+        juce::String fHi = vf();
+        proc.panic();
+        check(fHi.contains("b.wav"), "live CC switches to the other variant");
+        proc.setCC(27, 40);
+        hit(50);
+        juce::String fMid = vf();
+        proc.panic();
+        check(fMid == "(none)", "out-of-range CC silences all variants (no stacking)");
+        proc.panic();
     }
 
     // articulation isolation: choke groups and round-robins are scoped per
@@ -2172,8 +2231,9 @@ int main(int argc, char** argv)
         else juce::Logger::writeToLog("sweep2 load failed: " + err);
     }
 
-    // Scope probe: PASTEL_SCOPE=file.sfz,switch,note — load one file, press a
-    // switch, play a note; log voice files + their requirements. Info only.
+    // Scope probe: PASTEL_SCOPE=file.sfz,switch,note[,ccNum,ccVal] — load one
+    // file, press a switch, play a note; log voice files + their requirements.
+    // Optional live CC override (sfizz MidiState path). Info only.
     if (const char* scp = std::getenv("PASTEL_SCOPE"))
     {
         juce::StringArray parts = juce::StringArray::fromTokens(scp, ",", "");
@@ -2186,6 +2246,8 @@ int main(int argc, char** argv)
             {
                 int sw = parts[1].trim().getIntValue();
                 int note = parts[2].trim().getIntValue();
+                if (parts.size() >= 5)
+                    sp.setCC(parts[3].trim().getIntValue(), parts[4].trim().getIntValue());
                 sp.auditionNoteOn(sw, 0.8f);
                 sp.auditionNoteOff(sw);
                 juce::MidiBuffer m;
@@ -2202,11 +2264,78 @@ int main(int argc, char** argv)
                         vf.add(juce::File(p).getFileName() + "(req=" + juce::String(q) + ")");
                 }
                 juce::Logger::writeToLog("SCOPE sel=" + juce::String(sp.getLastKeyswitch())
+                    + " cc27=" + juce::String(sp.getCC(27))
                     + " voices=" + vf.joinIntoString("+"));
                 sp.panic();
             }
             else juce::Logger::writeToLog("scope load failed: " + err);
         }
+    }
+
+    // Whole-bank articulation audit: PASTEL_ARTBANK=bank.sfz — for every
+    // switch key, select it and play several notes; log which articulations
+    // (swReq keys + labels) actually voiced. FOREIGN = a different
+    // articulation's layer sounded under this switch. Info only.
+    if (const char* ab2 = std::getenv("PASTEL_ARTBANK"))
+    {
+        PastelProcessor sp;
+        sp.prepareToPlay(44100.0, 512);
+        juce::String err;
+        if (sp.loadSoundFile(juce::String::fromUTF8(ab2).trim(), err))
+        {
+            std::vector<int> switches;
+            for (auto& r : sp.getSwitchRanges())
+                for (int k = r.first; k <= r.second; ++k) switches.push_back(k);
+            const int notes[] = { 34, 40, 48, 55, 60, 64, 72 };
+            for (int sw : switches)
+            {
+                sp.auditionNoteOn(sw, 0.8f);
+                sp.auditionNoteOff(sw);
+                std::map<int,int> reqCount;
+                std::map<int, juce::String> reqFile;
+                int plainN = 0;
+                for (int note : notes)
+                {
+                    juce::MidiBuffer m;
+                    m.addEvent(juce::MidiMessage::noteOn(1, note, 0.9f), 0);
+                    juce::AudioBuffer<float> bb(2, 512);
+                    bb.clear();
+                    sp.processBlock(bb, m);
+                    for (int v = 0; v < 64; ++v)
+                    {
+                        auto p = sp.getVoiceSamplePath(v);
+                        if (p.isNotEmpty())
+                        {
+                            int q = sp.getVoiceSwReq(v);
+                            reqCount[q]++;
+                            reqFile[q] = juce::File(p).getFileName();
+                        }
+                    }
+                    juce::MidiBuffer off;
+                    off.addEvent(juce::MidiMessage::noteOff(1, note), 0);
+                    for (int i = 0; i < 10; ++i) { bb.clear(); sp.processBlock(bb, off); off.clear(); }
+                    sp.panic();
+                }
+                juce::String desc;
+                bool foreign = false;
+                for (auto& rc : reqCount)
+                {
+                    juce::String lbl = sp.getSwitchLabel(rc.first);
+                    desc += "req=" + juce::String(rc.first)
+                        + (lbl.isNotEmpty() ? "(" + lbl + ")" : "(plain)")
+                        + "x" + juce::String(rc.second)
+                        + "[" + reqFile[rc.first] + "] ";
+                    if (rc.first != sw && rc.first >= 0) foreign = true;
+                    if (rc.first < 0) plainN += rc.second;
+                }
+                juce::Logger::writeToLog("ARTBANK sw=" + juce::String(sw)
+                    + "(" + sp.getSwitchLabel(sw) + ")"
+                    + (foreign ? " FOREIGN" : " clean")
+                    + (plainN > 0 ? " PLAINx" + juce::String(plainN) : "")
+                    + " :: " + desc);
+            }
+        }
+        else juce::Logger::writeToLog("artbank load failed: " + err);
     }
 
     // 1:1 test: bank-with-selection must equal the individual patch file.

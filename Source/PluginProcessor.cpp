@@ -359,6 +359,7 @@ void PastelProcessor::handleMidi(juce::MidiBuffer& midi, int numSamples, double 
             sampler.allNotesOff();
             arpHeld.clear();
         }
+        else if (msg.isController()) sampler.setCC(msg.getControllerNumber(), msg.getControllerValue());
     }
 
     if (!arpOn)

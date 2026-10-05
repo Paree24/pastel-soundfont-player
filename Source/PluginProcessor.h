@@ -66,6 +66,7 @@ public:
     // engine note routing with active-note tracking (audio + message threads)
     void engineNoteOn(int note, float vel);
     void engineNoteOff(int note);
+    void setCC(int cc, int value) { sampler.setCC(cc, value); }
     std::vector<int> getActiveNotes() const;
     int getLastKeyswitch() const;
     std::vector<std::pair<int,int>> getMappedRanges() const;
@@ -74,6 +75,7 @@ public:
     juce::String getVoiceSamplePath(int voiceIdx) const;
     juce::String getSwitchLabel(int note) const;
     int getVoiceSwReq(int voiceIdx) const;
+    int getCC(int cc) const { return sampler.getCC(cc); }
 
     float getOutLevelL() const { return outL; }
     float getOutLevelR() const { return outR; }
