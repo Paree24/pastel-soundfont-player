@@ -1313,12 +1313,14 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool from
         g *= juce::Decibels::decibelsToGain(r.ampRandomDb * (rng.nextFloat() * 2.0f - 1.0f));
     vp->gainL = g * std::cos(r.pan * juce::MathConstants<float>::halfPi);
     vp->gainR = g * std::sin(r.pan * juce::MathConstants<float>::halfPi);
-    // Amplitude EG: UI ADSR when its toggle is on; otherwise the soundfont
-    // plays as authored (region ampeg_*), falling back to a neutral gate for
-    // plain regions: fastest attack, full sustain, tiny release.
-    if (adsrOn) vp->env.setParams(envA, envD, envS, envR);
-    else if (r.hasAmpEg) vp->env.setParams(r.ampA, r.ampD, r.ampS, r.ampR);
-    else vp->env.setParams(0.001f, 0.0f, 1.0f, 0.01f);
+    // Amplitude EG: a region-authored ampeg_* ALWAYS wins (the soundfont as
+    // authored); the UI ADSR voices only regions without one. This keeps the
+    // toggle gain-transparent on authored banks by construction: replacing a
+    // sustain-0.1 tail with sustain-full would add +20 dB, and a 1 ms attack
+    // over a 20-50 ms region attack punches transients through.
+    if (r.hasAmpEg) vp->env.setParams(r.ampA, r.ampD, r.ampS, r.ampR);
+    else if (adsrOn) vp->env.setParams(envA, envD, envS, envR);
+    else vp->env.setParams(0.001f, 0.0f, 1.0f, 0.01f); // neutral gate
     // Static region filter evaluated at note-on (velocity/key/CC folded in
     // as cents; no per-sample modulation by design).
     vp->filtOn = r.hasFilter;

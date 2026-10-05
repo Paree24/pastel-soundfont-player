@@ -104,9 +104,9 @@ public:
 
     void setSampleRate(double sr);
     void setEnvelope(float a, float d, float s, float r);
-    // UI ADSR engaged (default OFF): ON = UI ADSR voices every note;
-    // OFF = the soundfont plays as authored (region ampeg_* where present,
-    // else a neutral gate). Lock-protected.
+    // UI ADSR engaged (default OFF): voices SFZ regions WITHOUT an authored
+    // ampeg_* (authored EGs always win, so the toggle is gain-transparent
+    // on authored banks) and shapes the SF2 master voice. Lock-protected.
     void setAdsrEnabled(bool on);
     bool isAdsrEnabled() const;
     // Live MIDI CC value (sfizz MidiState): loccN/hiccN gates evaluate per

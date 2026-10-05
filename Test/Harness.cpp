@@ -1568,7 +1568,26 @@ int main(int argc, char** argv)
         setP(PP::ADSRON, 1.0f); setP(PP::SUS, 0.0f); setP(PP::DEC, 0.0f); // fast decay to zero
         float rAdsr = 0; renderNote(60, 12, rAdsr);
         check(rAdsr < rDry * 0.3f, "ADSR toggle engages the UI envelope");
-        setP(PP::ADSRON, 0.0f); setP(PP::SUS, 1.0f); setP(PP::DEC, 1.0f); // restore defaults
+        // UI ADSR at neutral defaults must match the engine neutral gate:
+        // no systematic gain jump from the toggle itself on plain regions.
+        setP(PP::SUS, 1.0f); setP(PP::DEC, 1.0f);
+        setP(PP::ATK, 0.0f); setP(PP::REL, 0.0f);
+        float rOn = 0; renderNote(60, 12, rOn);
+        juce::Logger::writeToLog("adsr neutral on=" + juce::String(rOn) + " off=" + juce::String(rDry2));
+        check(std::abs(rOn / juce::jmax(rDry2, 1e-6f) - 1.0f) < 0.2f,
+              "UI ADSR at neutral matches gate (no toggle gain jump)");
+        setP(PP::ADSRON, 0.0f); // restore defaults
+        // authored EGs always win: toggle must not move regions with ampeg_*
+        dryd.getChildFile("e.sfz").replaceWithText(
+            "<region> sample=t.wav key=60 pitch_keycenter=60 ampeg_attack=0.02 ampeg_sustain=10\n");
+        check(proc.loadSoundFile(dryd.getChildFile("e.sfz").getFullPathName(), err), "eg fixture loads");
+        float rEgOff = 0; renderNote(60, 12, rEgOff);
+        setP(PP::ADSRON, 1.0f);
+        float rEgOn = 0; renderNote(60, 12, rEgOn);
+        juce::Logger::writeToLog("adsr authored off=" + juce::String(rEgOff) + " on=" + juce::String(rEgOn));
+        check(std::abs(rEgOn / juce::jmax(rEgOff, 1e-6f) - 1.0f) < 0.05f,
+              "ADSR toggle transparent on authored EGs");
+        setP(PP::ADSRON, 0.0f);
         proc.panic();
     }
 
