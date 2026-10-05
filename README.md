@@ -1,5 +1,9 @@
 # Pastel Soundfont Player
 
+> **Disclaimer:** this project is vibe-coded for personal use. It is provided
+> as-is, without warranty of any kind. The author is not responsible for
+> anything — Use at your own risk.
+
 A simple SF2/SFZ player plugin (VST3 + Standalone) with a flat pastel UI.
 Load a soundfont and play — ADSR, filter, LFO and all effects default to
 **off**, so libraries sound exactly as authored until you engage something.
