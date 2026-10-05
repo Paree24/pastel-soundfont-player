@@ -1,0 +1,8 @@
+build/
+*.log
+*.wav
+*.sfz
+!Test/
+*.o
+*.a
+.DS_Store
