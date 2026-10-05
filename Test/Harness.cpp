@@ -1577,7 +1577,8 @@ int main(int argc, char** argv)
         check(std::abs(rOn / juce::jmax(rDry2, 1e-6f) - 1.0f) < 0.2f,
               "UI ADSR at neutral matches gate (no toggle gain jump)");
         setP(PP::ADSRON, 0.0f); // restore defaults
-        // authored EGs always win: toggle must not move regions with ampeg_*
+        // authored EGs are shaped when the toggle is on: UI replace must move
+        // the voice (toggle functional on authored banks too)
         dryd.getChildFile("e.sfz").replaceWithText(
             "<region> sample=t.wav key=60 pitch_keycenter=60 ampeg_attack=0.02 ampeg_sustain=10\n");
         check(proc.loadSoundFile(dryd.getChildFile("e.sfz").getFullPathName(), err), "eg fixture loads");
@@ -1585,8 +1586,7 @@ int main(int argc, char** argv)
         setP(PP::ADSRON, 1.0f);
         float rEgOn = 0; renderNote(60, 12, rEgOn);
         juce::Logger::writeToLog("adsr authored off=" + juce::String(rEgOff) + " on=" + juce::String(rEgOn));
-        check(std::abs(rEgOn / juce::jmax(rEgOff, 1e-6f) - 1.0f) < 0.05f,
-              "ADSR toggle transparent on authored EGs");
+        check(rEgOn > rEgOff * 1.5f, "ADSR toggle shapes authored EGs");
         setP(PP::ADSRON, 0.0f);
         proc.panic();
     }
@@ -2002,8 +2002,8 @@ int main(int argc, char** argv)
         else juce::Logger::writeToLog("gt bank skipped (no bank file)");
     }
 
-    // Render-out for DAW/Sforzando A/B: PASTEL_RENDER="bank.sfz,note,vel,seconds,out.wav[,switch]"
-    // e.g. PASTEL_RENDER="kit.sfz,36,100,2.0,/tmp/ref.wav,27". Not part of pass/fail.
+    // Render-out for DAW/Sforzando A/B: PASTEL_RENDER="bank.sfz,note,vel,seconds,out.wav[,switch[,adsr]]"
+    // e.g. PASTEL_RENDER="kit.sfz,36,100,2.0,/tmp/ref.wav,27". adsr=1 engages the UI ADSR. Not part of pass/fail.
     if (const char* renv = std::getenv("PASTEL_RENDER"))
     {
         juce::StringArray parts = juce::StringArray::fromTokens(renv, ",", "");
@@ -2020,6 +2020,9 @@ int main(int argc, char** argv)
                     rp.auditionNoteOn(sw, 0.8f);
                     rp.auditionNoteOff(sw);
                 }
+                if (parts.size() >= 7 && parts[6].trim().getIntValue() > 0)
+                    if (auto* p = rp.apvts.getParameter(PP::ADSRON))
+                        p->setValueNotifyingHost(1.0f);
                 int note = parts[1].trim().getIntValue();
                 float vel = parts[2].trim().getIntValue() / 127.0f;
                 double secs = parts[3].trim().getDoubleValue();
