@@ -22,15 +22,12 @@ jobs:
           - os: ubuntu-latest
             exe: ''
             artifact: linux
-            cmake_extra: ''
           - os: windows-latest
             exe: '.exe'
             artifact: windows
-            cmake_extra: ''
           - os: macos-latest
             exe: ''
             artifact: macos
-            cmake_extra: '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64'
     steps:
       - uses: actions/checkout@v4
 
@@ -44,8 +41,13 @@ jobs:
             libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
             libxrandr-dev libxrender-dev libgl1-mesa-dev libxkbcommon-dev
 
+      - name: Configure (macOS universal binary)
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_extra }}
+        if: runner.os != 'macOS'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -60,7 +62,7 @@ jobs:
           mkdir -p "${{ github.workspace }}/dist"
           cd "${{ github.workspace }}/build/PastelPlayer_artefacts/Release"
           ls
-          cmake -E tar czf "${{ github.workspace }}/dist/Pastel-Soundfont-Player-${{ matrix.artifact }}-VST3.tar.gz" "Pastel Soundfont Player.vst3"
+          cmake -E tar czf "${{ github.workspace }}/dist/Pastel-Soundfont-Player-${{ matrix.artifact }}-VST3.tar.gz" "VST3/Pastel Soundfont Player.vst3"
           cmake -E tar czf "${{ github.workspace }}/dist/Pastel-Soundfont-Player-${{ matrix.artifact }}-Standalone.tar.gz" "Standalone"
 
       - name: Upload artifacts
