@@ -1,5 +1,7 @@
 # Pastel Soundfont Player
 
+[![Build](https://github.com/Paree24/pastel-soundfont-player/actions/workflows/build.yml/badge.svg)](https://github.com/Paree24/pastel-soundfont-player/actions/workflows/build.yml)
+
 > **Disclaimer:** this project is vibe-coded for personal use. It is provided
 > as-is, without warranty of any kind. The author is not responsible for
 > anything — Use at your own risk.
