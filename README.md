@@ -33,19 +33,61 @@ Master defaults to −6 dB headroom.
 
 ## Build
 
+Prerequisites on all platforms: CMake ≥ 3.22, git (JUCE 8.0.6 is fetched
+automatically on first configure, ~100 MB), and a C++17 compiler.
+Build outputs (VST3 + Standalone) land under
+`build/PastelPlayer_artefacts/Release/`.
+
+### Linux (tested)
+
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-# VST3 + Standalone land under build/PastelPlayer_artefacts/Release/
 ```
-
-Requires CMake, Ninja, a C++17 compiler, and internet access once for the
-JUCE dependency (or point it at an existing checkout). Tested on Linux.
 
 Install the VST3 with:
 
 ```sh
 cp -r "build/PastelPlayer_artefacts/Release/VST3/Pastel Soundfont Player.vst3" ~/.vst3/
+```
+
+### Windows
+
+Install Visual Studio 2022 (any edition, with the “Desktop development
+with C++” workload), CMake (via the installer or `winget install Kitware.CMake`),
+Ninja (`winget install Ninja-build.Ninja`) and git. Then in
+“x64 Native Tools Command Prompt” (or PowerShell):
+
+```bat
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+cmake --build build
+```
+
+Copy `build\PastelPlayer_artefacts\Release\VST3\Pastel Soundfont Player.vst3`
+to `C:\Program Files\Common Files\VST3\` and rescan plugins in your DAW.
+(Alternatively use `-G "Visual Studio 17 2022" -A x64` and build the
+generated solution instead of Ninja.)
+
+### macOS
+
+Install Xcode (or the Command Line Tools: `xcode-select --install`),
+CMake (`brew install cmake ninja`) and git. Then:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+cmake --build build
+```
+
+Copy `build/PastelPlayer_artefacts/Release/VST3/Pastel Soundfont Player.vst3`
+to `~/Library/Audio/Plug-Ins/VST3/` (all users:
+`/Library/Audio/Plug-Ins/VST3/`) and rescan plugins in your DAW.
+Note: the plugin is unsigned — on first run macOS may block it; allow it
+in System Settings → Privacy & Security, or remove the quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine \
+  ~/Library/Audio/Plug-Ins/VST3/"Pastel Soundfont Player.vst3"
 ```
 
 ## License
