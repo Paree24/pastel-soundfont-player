@@ -86,3 +86,25 @@ jobs:
         with:
           files: dist/**/*
           generate_release_notes: true
+
+  auto-release:
+    name: Auto release
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: auto
+          name: auto
+          body: "Rolling prerelease from the latest successful main build (${{ github.sha }}). Rebuilt on every push; artifacts are replaced each time."
+          prerelease: true
+          allowUpdates: true
+          removeArtifacts: true
+          artifacts: "dist/**/*"
