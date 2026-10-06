@@ -41,13 +41,10 @@ jobs:
             libxext-dev libxfixes-dev libxi-dev libxinerama-dev \
             libxrandr-dev libxrender-dev libgl1-mesa-dev libxkbcommon-dev
 
-      - name: Configure (macOS universal binary)
-        if: runner.os == 'macOS'
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
-
       - name: Configure
-        if: runner.os != 'macOS'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        # Native arch only (Apple Silicon on CI runners): a universal
+        # arm64+x86_64 build doubles macOS compile time past 20 min.
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -101,12 +98,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: ncipollo/release-action@v1
-        with:
-          tag: auto
-          name: auto
-          body: "Rolling prerelease from the latest successful main build (${{ github.sha }}). Rebuilt on every push; artifacts are replaced each time."
-          prerelease: true
-          allowUpdates: true
-          removeArtifacts: true
-          artifacts: "dist/**/*"
+      - name: Refresh rolling auto release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete auto --cleanup-tag -y || true
+          gh release create auto --prerelease --title "auto" \
+            --notes "Rolling auto-build from the latest green main commit (${{ github.sha }}). Linux / Windows / macOS VST3 + Standalone. For stable versions see the v* releases." \
+            dist/*

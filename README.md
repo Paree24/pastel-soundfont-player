@@ -76,10 +76,14 @@ Install Xcode (or the Command Line Tools: `xcode-select --install`),
 CMake (`brew install cmake ninja`) and git. Then:
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
+
+This builds for your machine's architecture (Apple Silicon on current
+Macs). For a universal arm64+x86_64 binary instead (roughly doubles the
+build), add `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` to the configure
+line. CI builds Apple Silicon only.
 
 Copy `build/PastelPlayer_artefacts/Release/VST3/Pastel Soundfont Player.vst3`
 to `~/Library/Audio/Plug-Ins/VST3/` (all users:
