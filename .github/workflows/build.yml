@@ -56,9 +56,10 @@ jobs:
         # absent; all synthetic-fixture checks must pass.
 
       - name: Package
-        working-directory: build/PastelPlayer_artefacts/Release
         run: |
           mkdir -p "${{ github.workspace }}/dist"
+          cd "${{ github.workspace }}/build/PastelPlayer_artefacts/Release"
+          ls
           cmake -E tar czf "${{ github.workspace }}/dist/Pastel-Soundfont-Player-${{ matrix.artifact }}-VST3.tar.gz" "Pastel Soundfont Player.vst3"
           cmake -E tar czf "${{ github.workspace }}/dist/Pastel-Soundfont-Player-${{ matrix.artifact }}-Standalone.tar.gz" "Standalone"
 
