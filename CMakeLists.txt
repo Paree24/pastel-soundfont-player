@@ -32,7 +32,7 @@ juce_add_binary_data(PastelAssets
 )
 
 juce_add_plugin(PastelPlayer
-  COMPANY_NAME "Pastel Soundfont Player"
+  COMPANY_NAME "Pastel SFZ Player"
   BUNDLE_ID "com.pastelsoundfontplayer.pastelplayer"
   PLUGIN_MANUFACTURER_CODE Past
   PLUGIN_CODE Psp1
