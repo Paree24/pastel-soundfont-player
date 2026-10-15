@@ -1,6 +1,9 @@
 #include "SamplerEngine.h"
 #include <functional>
 
+int pastelTsfPresetBank(const tsf* f, int i);   // TsfImpl.cpp
+int pastelTsfPresetNumber(const tsf* f, int i);
+
 SamplerEngine::SamplerEngine()
 {
     formats.registerBasicFormats();
@@ -54,35 +57,72 @@ bool SamplerEngine::isAdsrEnabled() const
     return adsrOn;
 }
 
+juce::String SamplerEngine::currentPath() const
+{
+    juce::ScopedLock sl(lock);
+    return currentFile;
+}
+
 juce::String SamplerEngine::currentName() const
 {
+    juce::ScopedLock sl(lock);
     if (currentFile.isEmpty()) return "No file loaded";
     return juce::File(currentFile).getFileName();
 }
 
 juce::String SamplerEngine::programName() const
 {
+    juce::ScopedLock sl(lock);
     if (!loaded) return "-";
-    if (loadedSf2)
+    if (loadedSf2 && soundfont != nullptr)
     {
-        auto names = getPresetNames();
-        if (sf2Preset >= 0 && sf2Preset < names.size() && names[sf2Preset].isNotEmpty())
-            return names[sf2Preset];
-        return "Preset " + juce::String(sf2Preset);
+        // report the preset that is actually sounding (a bank/program pair
+        // missing from the file leaves the previous preset selected)
+        int idx = tsf_channel_get_preset_index(soundfont, 0);
+        const char* nm = tsf_get_presetname(soundfont, idx);
+        if (nm != nullptr && *nm != 0) return juce::String(nm);
+        return "Preset " + juce::String(pastelTsfPresetNumber(soundfont, idx));
     }
     return juce::String(regions.size()) + " regions";
 }
 
-int SamplerEngine::getPresetCount() const { return 128; }
+int SamplerEngine::getPresetCount() const
+{
+    juce::ScopedLock sl(lock);
+    return soundfont != nullptr ? tsf_get_presetcount(soundfont) : 0;
+}
 
 juce::StringArray SamplerEngine::getPresetNames() const
 {
     juce::StringArray names;
-    if (soundfont == nullptr) return names;
+    for (auto& p : getSf2Presets()) names.add(p.name);
+    return names;
+}
+
+std::vector<SamplerEngine::Sf2Preset> SamplerEngine::getSf2Presets() const
+{
+    juce::ScopedLock sl(lock);
+    std::vector<Sf2Preset> out;
+    if (soundfont == nullptr) return out;
     int count = tsf_get_presetcount(soundfont);
     for (int i = 0; i < count; ++i)
-        names.add(juce::String(tsf_get_presetname(soundfont, i)));
-    return names;
+        out.push_back({ pastelTsfPresetBank(soundfont, i), pastelTsfPresetNumber(soundfont, i),
+                        juce::String(tsf_get_presetname(soundfont, i)) });
+    std::sort(out.begin(), out.end(), [](const Sf2Preset& a, const Sf2Preset& b)
+    {
+        return a.bank != b.bank ? a.bank < b.bank : a.program < b.program;
+    });
+    return out;
+}
+
+bool SamplerEngine::getActiveSf2Preset(int& bank, int& program) const
+{
+    juce::ScopedLock sl(lock);
+    if (soundfont == nullptr || !loadedSf2) return false;
+    int idx = tsf_channel_get_preset_index(soundfont, 0);
+    bank = pastelTsfPresetBank(soundfont, idx);
+    program = pastelTsfPresetNumber(soundfont, idx);
+    return bank >= 0 && program >= 0;
 }
 
 void SamplerEngine::setSf2Preset(int bank, int preset)
@@ -167,6 +207,8 @@ void SamplerEngine::unloadInternal()
     if (soundfont != nullptr) { tsf_close(soundfont); soundfont = nullptr; }
     sf2EgGate = false;
     sf2MasterEg.reset();
+    std::fill(std::begin(sf2Held), std::end(sf2Held), false);
+    sf2HeldCount = 0;
     lastKeyswitch = -1;
     loaded = false; loadedSf2 = false; currentFile = "";
 }
@@ -435,6 +477,7 @@ void SamplerEngine::swapWith(SamplerEngine& other)
     std::swap(voiceCounter, other.voiceCounter);
     sf2MasterEg.reset(); other.sf2MasterEg.reset();
     sf2EgGate = false; other.sf2EgGate = false;
+    std::fill(std::begin(sf2Held), std::end(sf2Held), false); sf2HeldCount = 0;
     std::swap(soundfont, other.soundfont);
     std::swap(sf2Bank, other.sf2Bank);
     std::swap(sf2Preset, other.sf2Preset);
@@ -1022,7 +1065,7 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
             + " Searched " + juce::String(libIndexedFiles) + " files in "
             + juce::String(libIndexedRoots) + " shortcut folder(s).";
         if (searchCapped)
-            lastLoadDetail += " Search was capped (big/slow folders) —"
+            lastLoadDetail += " Search was capped (big/slow folders) -"
                 " add the exact Samples folder as a shortcut for a complete search.";
         if (firstMissing.isNotEmpty())
             lastLoadDetail += " First missing: '" + firstMissing + "' (tried: " + firstTried + ")."
@@ -1057,7 +1100,7 @@ bool SamplerEngine::fireNote(int note, float vel01, int wantTrigger, bool allowD
 {
     float vel = juce::jlimit(0.0f, 1.0f, vel01);
     int r0 = rng.nextInt(128); // one roll per trigger, shared by all candidates
-    int v = (int) std::round(vel * 100.0f);
+    int v = (int) std::round(vel * 127.0f); // lovel/hivel are MIDI 0..127
     // sfizz strategy: every key+trigger-matching region evaluates its cycle
     // CHECK-then-advance (post-increment): the first hit plays position 1.
     // Evaluation happens even for regions filtered out later, so sparse
@@ -1205,6 +1248,7 @@ void SamplerEngine::noteOn(int midiNote, float velocity01)
     if (loadedSf2 && soundfont != nullptr)
     {
         tsf_channel_note_on(soundfont, 0, midiNote, juce::jmax(0.01f, vel));
+        if (midiNote >= 0 && midiNote < 128 && !sf2Held[midiNote]) { sf2Held[midiNote] = true; ++sf2HeldCount; }
         // retrigger when idle: the gate may have been released by an
         // earlier all-notes-off while no new note arrived since.
         // UI-ADSR-gated only: toggle off = raw soundfont voice.
@@ -1216,7 +1260,7 @@ void SamplerEngine::noteOn(int midiNote, float velocity01)
     // range inside sw_lokey..sw_hikey, so a switch key must still trigger
     // matching regions (pure switch keys match nothing and stay silent).
     if (isSwitchKey(midiNote)) lastKeyswitch = midiNote;
-    if (midiNote >= 0 && midiNote < 128) lastVel[midiNote] = (int) std::round(vel * 100.0f);
+    if (midiNote >= 0 && midiNote < 128) lastVel[midiNote] = (int) std::round(vel * 127.0f);
     fireNote(midiNote, vel, 0, true);
 }
 
@@ -1359,8 +1403,10 @@ void SamplerEngine::noteOff(int midiNote)
     if (loadedSf2 && soundfont != nullptr)
     {
         tsf_channel_note_off(soundfont, 0, midiNote);
-        // release master EG when no voices active
-        if (tsf_active_voice_count(soundfont) <= 0 && sf2EgGate)
+        if (midiNote >= 0 && midiNote < 128 && sf2Held[midiNote]) { sf2Held[midiNote] = false; --sf2HeldCount; }
+        // release master EG once the last held key goes up (tsf's voice
+        // count includes releasing voices, so it never reached 0 in time)
+        if (sf2HeldCount <= 0 && sf2EgGate)
         {
             sf2MasterEg.noteOff();
             sf2EgGate = false;
@@ -1380,7 +1426,7 @@ void SamplerEngine::noteOff(int midiNote)
     if (loaded && !regions.empty() && !isSwitchKey(midiNote))
     {
         int v = (midiNote >= 0 && midiNote < 128) ? lastVel[midiNote] : 100;
-        fireNote(midiNote, v / 100.0f, 1, true);
+        fireNote(midiNote, v / 127.0f, 1, true);
     }
 }
 
@@ -1390,6 +1436,8 @@ void SamplerEngine::allNotesOff()
     if (loadedSf2 && soundfont != nullptr)
     {
         tsf_note_off_all(soundfont);
+        std::fill(std::begin(sf2Held), std::end(sf2Held), false);
+        sf2HeldCount = 0;
         if (sf2EgGate) sf2MasterEg.noteOff();
         return;
     }
@@ -1409,6 +1457,8 @@ void SamplerEngine::panic()
         sf2MasterEg.reset();
         sf2EgGate = false;
     }
+    std::fill(std::begin(sf2Held), std::end(sf2Held), false);
+    sf2HeldCount = 0;
 }
 
 void SamplerEngine::renderAdding(float* destL, float* destR, int numSamples)

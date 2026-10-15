@@ -242,7 +242,7 @@ void DelayFX::clear()
 void DelayFX::process(float* L, float* R, int n, float timeMs, float fb, float mix)
 {
     if (mix <= 0.001f) return;
-    timeMs = juce::jlimit(20.0f, 1500.0f, timeMs);
+    timeMs = juce::jlimit(1.0f, 1990.0f, timeMs);
     float samples = (float)(timeMs * sampleRate / 1000.0);
     for (int i = 0; i < n; ++i)
     {
@@ -384,7 +384,7 @@ void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
             else
             {
                 xL = fo6[0].processSample(0, xL);
-                xR = fo6[1].processSample(1, xR);
+                xR = fo6[1].processSample(0, xR);
             }
         }
         else

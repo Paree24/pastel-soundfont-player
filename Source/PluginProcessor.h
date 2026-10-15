@@ -54,7 +54,8 @@ public:
     juce::String currentSoundName() const;
     juce::String currentSoundPath() const;
     juce::String currentProgramName() const;
-    juce::StringArray sf2PresetNames() const;
+    std::vector<SamplerEngine::Sf2Preset> sf2Presets() const;
+    bool getActiveSf2Preset(int& bank, int& program) const;
     void panic();
 
     FileLibrary library;
@@ -85,6 +86,7 @@ private:
     DspParams collectParams();
     void handleMidi(juce::MidiBuffer& midi, int numSamples, double bpm);
     void arpReset();
+    void arpReleaseAll(); // note-off for everything the arp is sounding
     int arpNextNote();
     void refreshSamplerSearchPaths();
     void cancelLoadJob();
@@ -103,7 +105,9 @@ private:
     int arpLastNote = -1;
     double arpLastBpm = 120.0;
 
-    float outL = 0.0f, outR = 0.0f;
+    juce::AudioBuffer<float> monoScratch; // stereo render target for mono outputs
+
+    std::atomic<float> outL { 0.0f }, outR { 0.0f };
     int lastBank = -1, lastPreset = -1;
     float lastA = -1, lastD = -1, lastS = -1, lastR = -1;
     bool lastAdsrOn = false;

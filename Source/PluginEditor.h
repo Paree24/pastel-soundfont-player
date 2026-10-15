@@ -100,12 +100,15 @@ private:
     juce::GroupComponent arpGroup { {}, "Arpeggiator" };
 
     juce::OwnedArray<juce::GroupComponent> fxCards;
-    juce::Label limCap { {}, "LIMITER" }, monoCap { {}, "MONO" };
+    juce::Label limCap { {}, "LIMITER" }, monoCap { {}, "MONO" }, syncCap { {}, "SYNC" };
 
     PianoStrip piano;
 
     float meterL = 0.0f, meterR = 0.0f;
+    juce::Rectangle<int> meterArea;
     int lastShownSwitch = -2;
+    std::vector<SamplerEngine::Sf2Preset> presetList; // presetBox item i+1 -> entry i
+    int shownBank = -1, shownProgram = -1;
 
     Knob* addKnob(const juce::String& paramId, const juce::String& title);
     Switch* addSwitch(const juce::String& paramId, const juce::String& title);

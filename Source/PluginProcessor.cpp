@@ -26,6 +26,8 @@ void PastelProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     lastSampleRate = sampleRate;
     sampler.setSampleRate(sampleRate);
     dsp.prepare(sampleRate, samplesPerBlock);
+    monoScratch.setSize(2, juce::jmax(1, samplesPerBlock));
+    arpReleaseAll();
     arpReset();
     // NOTE: no auto-load here on purpose. A new instance starts empty;
     // only DAW state restore (setStateInformation) recalls a patch.
@@ -146,7 +148,8 @@ bool PastelProcessor::loadSoundFile(const juce::String& path, juce::String& erro
 juce::String PastelProcessor::currentSoundName() const { return sampler.currentName(); }
 juce::String PastelProcessor::currentSoundPath() const { return sampler.currentPath(); }
 juce::String PastelProcessor::currentProgramName() const { return sampler.programName(); }
-juce::StringArray PastelProcessor::sf2PresetNames() const { return sampler.getPresetNames(); }
+std::vector<SamplerEngine::Sf2Preset> PastelProcessor::sf2Presets() const { return sampler.getSf2Presets(); }
+bool PastelProcessor::getActiveSf2Preset(int& bank, int& program) const { return sampler.getActiveSf2Preset(bank, program); }
 bool PastelProcessor::isSoundLoaded() const { return sampler.isLoaded(); }
 
 void PastelProcessor::panic()
@@ -284,6 +287,12 @@ DspParams PastelProcessor::collectParams()
     return p;
 }
 
+void PastelProcessor::arpReleaseAll()
+{
+    for (auto& po : arpPendingOffs) engineNoteOff(po.first);
+    if (arpLastNote >= 0) engineNoteOff(arpLastNote);
+}
+
 void PastelProcessor::arpReset()
 {
     arpHeld.clear();
@@ -360,13 +369,19 @@ void PastelProcessor::handleMidi(juce::MidiBuffer& midi, int numSamples, double 
         {
             sampler.allNotesOff();
             arpHeld.clear();
+            juce::ScopedLock sl(activeLock);
+            activeNotes.clear();
         }
         else if (msg.isController()) sampler.setCC(msg.getControllerNumber(), msg.getControllerValue());
     }
 
     if (!arpOn)
     {
-        if (!arpHeld.empty() || arpLastNote >= 0) arpReset();
+        if (!arpHeld.empty() || arpLastNote >= 0 || !arpPendingOffs.empty())
+        {
+            arpReleaseAll();
+            arpReset();
+        }
         for (auto& e : evs)
         {
             if (e.on) engineNoteOn(e.note, e.vel);
@@ -416,6 +431,8 @@ void PastelProcessor::handleMidi(juce::MidiBuffer& midi, int numSamples, double 
         if (n >= 0)
         {
             if (arpLastNote >= 0) engineNoteOff(arpLastNote);
+            arpPendingOffs.erase(std::remove_if(arpPendingOffs.begin(), arpPendingOffs.end(),
+                [n](const std::pair<int,int>& po) { return po.first == n; }), arpPendingOffs.end());
             engineNoteOn(n, 0.9f);
             arpLastNote = n;
             int lenSamples = juce::jmax(1, (int)(stepSamples * juce::jlimit(0.1f, 1.0f, gate) * 0.98));
@@ -461,24 +478,29 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     midi.clear();
 
     buffer.clear();
+    const int numSamples = buffer.getNumSamples();
     int nCh = juce::jmin(2, buffer.getNumChannels());
     if (nCh == 1)
     {
-        // render mono via temp stereo then fold
-        juce::AudioBuffer<float> tmp(2, buffer.getNumSamples());
-        tmp.clear();
-        sampler.renderAdding(tmp.getWritePointer(0), tmp.getWritePointer(1), buffer.getNumSamples());
+        // Mono bus: render + run the stereo FX chain on a stereo scratch,
+        // then fold. (Running DSP in place with L aliasing R processed
+        // every sample twice through the stereo effects.)
+        if (monoScratch.getNumSamples() < numSamples)
+            monoScratch.setSize(2, numSamples, false, false, true);
+        juce::AudioBuffer<float> st(monoScratch.getArrayOfWritePointers(), 2, numSamples);
+        st.clear();
+        sampler.renderAdding(st.getWritePointer(0), st.getWritePointer(1), numSamples);
+        dsp.process(st, p);
         auto* dst = buffer.getWritePointer(0);
-        auto* tl = tmp.getReadPointer(0);
-        auto* tr = tmp.getReadPointer(1);
-        for (int i = 0; i < buffer.getNumSamples(); ++i) dst[i] = 0.5f * (tl[i] + tr[i]);
+        auto* tl = st.getReadPointer(0);
+        auto* tr = st.getReadPointer(1);
+        for (int i = 0; i < numSamples; ++i) dst[i] = 0.5f * (tl[i] + tr[i]);
     }
     else if (nCh >= 2)
     {
-        sampler.renderAdding(buffer.getWritePointer(0), buffer.getWritePointer(1), buffer.getNumSamples());
+        sampler.renderAdding(buffer.getWritePointer(0), buffer.getWritePointer(1), numSamples);
+        dsp.process(buffer, p);
     }
-
-    dsp.process(buffer, p);
     outL = dsp.getLevelL();
     outR = dsp.getLevelR();
 }

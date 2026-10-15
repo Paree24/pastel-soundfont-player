@@ -91,13 +91,18 @@ public:
     static bool isAudioFile(const juce::File& f);
     std::vector<std::pair<int,int>> getMappedRanges() const;
     std::vector<std::pair<int,int>> getSwitchRanges() const;
-    juce::String currentPath() const { return currentFile; }
+    juce::String currentPath() const; // lock-protected (swapped by background loads)
     juce::String currentName() const;
     juce::String programName() const;
 
-    // SF2 programs
+    // SF2 programs. Presets are addressed by (bank, program) number, the
+    // same as MIDI bank select / program change; list is sorted that way.
+    struct Sf2Preset { int bank = 0, program = 0; juce::String name; };
     int getPresetCount() const;
     juce::StringArray getPresetNames() const;
+    std::vector<Sf2Preset> getSf2Presets() const;
+    // preset actually sounding on channel 0 (false = no SF2 loaded)
+    bool getActiveSf2Preset(int& bank, int& program) const;
     void setSf2Preset(int bank, int preset);
     int getSf2Bank() const { return sf2Bank; }
     int getSf2Preset() const { return sf2Preset; }
@@ -268,6 +273,8 @@ private:
     // SF2 global EG (tsf owns its voices, so ADSR shapes the sum)
     EnvADSR sf2MasterEg;
     bool sf2EgGate = false;
+    bool sf2Held[128] = {}; // keys physically down (tsf voice count includes releases)
+    int sf2HeldCount = 0;
 
     // SF2 data
     tsf* soundfont = nullptr;

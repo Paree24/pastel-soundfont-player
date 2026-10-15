@@ -45,6 +45,7 @@ public:
     void drawComboBox(juce::Graphics&, int w, int h, bool down, int bx, int by, int bw, int bh,
                       juce::ComboBox&) override;
     juce::Font getComboBoxFont(juce::ComboBox&) override;
+    void positionComboBoxText(juce::ComboBox&, juce::Label&) override;
     void drawGroupComponentOutline(juce::Graphics&, int w, int h, const juce::String&,
                             const juce::Justification&, juce::GroupComponent&) override;
     void drawButtonBackground(juce::Graphics&, juce::Button&, const juce::Colour&,

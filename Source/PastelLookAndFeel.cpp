@@ -56,8 +56,15 @@ juce::Colour PastelLookAndFeel::accentFor(juce::Component& c)
     return PastelColors::teal;
 }
 
-juce::Font PastelLookAndFeel::getLabelFont(juce::Label&) { return uiFont(12.5f); }
+juce::Font PastelLookAndFeel::getLabelFont(juce::Label& l) { return l.getFont(); } // honour setFont
 juce::Font PastelLookAndFeel::getComboBoxFont(juce::ComboBox&) { return uiFont(13.0f); }
+
+void PastelLookAndFeel::positionComboBoxText(juce::ComboBox& box, juce::Label& label)
+{
+    // arrow is drawn in the last ~18 px; give the text everything else
+    label.setBounds(1, 1, box.getWidth() - 20, box.getHeight() - 2);
+    label.setFont(getComboBoxFont(box));
+}
 juce::Font PastelLookAndFeel::getPopupMenuFont() { return uiFont(13.5f); }
 juce::Font PastelLookAndFeel::getTextButtonFont(juce::TextButton&, int) { return titleFont(12.5f); }
 
@@ -177,7 +184,9 @@ void PastelLookAndFeel::drawGroupComponentOutline(juce::Graphics& g, int w, int 
     g.fillRect(1, (int)(barH - 5), w - 2, 5);
     g.setColour(PastelColors::barText);
     g.setFont(titleFont(13.0f));
-    g.drawText(text.toUpperCase(), 10, 0, w - 12, (int)barH, juce::Justification::centredLeft, false);
+    // keep clear of the title-bar toggle on the right; squeeze long titles
+    g.drawFittedText(text.toUpperCase(), 10, 0, w - 66, (int)barH,
+                     juce::Justification::centredLeft, 1, 0.75f);
 }
 
 void PastelLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& b,

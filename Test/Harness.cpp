@@ -250,7 +250,29 @@ int main(int argc, char** argv)
 #endif
     juce::ScopedJuceInitialiser_GUI juceInit;
 
-    auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory)
+    // UI snapshot: PASTEL_SNAPSHOT=out.png [PASTEL_SNAPSHOT_SIZE=WxH]
+    // renders the editor offscreen (layout review) and exits.
+    if (const char* snap = std::getenv("PASTEL_SNAPSHOT"))
+    {
+        PastelProcessor proc;
+        proc.prepareToPlay(44100.0, 512);
+        std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
+        if (const char* sz = std::getenv("PASTEL_SNAPSHOT_SIZE"))
+        {
+            auto dims = juce::StringArray::fromTokens(sz, "x", "");
+            if (dims.size() == 2) ed->setSize(dims[0].getIntValue(), dims[1].getIntValue());
+        }
+        auto img = ed->createComponentSnapshot(ed->getLocalBounds());
+        juce::File out(juce::String::fromUTF8(snap));
+        out.deleteFile();
+        juce::FileOutputStream os(out);
+        juce::PNGImageFormat png;
+        bool ok = os.openedOk() && png.writeImageToStream(img, os);
+        ed.reset();
+        return ok ? 0 : 1;
+    }
+
+    auto tmp =juce::File::getSpecialLocation(juce::File::tempDirectory)
                    .getChildFile("pastel_harness_test");
     tmp.createDirectory();
     auto wavFile = tmp.getChildFile("tone.wav");
@@ -2600,6 +2622,84 @@ int main(int argc, char** argv)
             juce::Logger::writeToLog("LOADTEST worstPeak=" + juce::String(worstPeak));
             check(allFinite && worstPeak < 1.1f, "bank output finite, no runaway gain");
         }
+    }
+
+    // ---- regression: lovel/hivel use the MIDI 0..127 scale ----
+    {
+        auto velSfz = tmp.getChildFile("hivel.sfz");
+        velSfz.replaceWithText("<region> sample=tone.wav lokey=0 hikey=127 pitch_keycenter=60"
+                               " lovel=101 hivel=127\n");
+        PastelProcessor vp;
+        vp.prepareToPlay(44100.0, 512);
+        juce::String err;
+        check(vp.loadSoundFile(velSfz.getFullPathName(), err), "hivel fixture loads");
+        auto loud = renderHeld(vp, 60, 0.9f, 2);   // MIDI vel 114 -> inside 101..127
+        check(bufferRMS(loud) > 1e-4f, "vel 114 plays a lovel=101 hivel=127 region");
+        vp.panic();
+        auto soft = renderHeld(vp, 60, 0.5f, 2);   // MIDI vel 64 -> outside
+        check(bufferRMS(soft) < 1e-6f, "vel 64 skips a lovel=101 region");
+        vp.panic();
+    }
+
+    // ---- regression: switching the arp off releases its sounding note ----
+    {
+        PastelProcessor ap;
+        ap.prepareToPlay(44100.0, 512);
+        juce::String err;
+        ap.loadSoundFile(sfzFile.getFullPathName(), err);
+        ap.apvts.getParameter(PP::ARPON)->setValueNotifyingHost(1.0f);
+        ap.apvts.getParameter(PP::ARPGATE)->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> b(2, 512);
+        juce::MidiBuffer on;
+        on.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        ap.apvts.getParameter(PP::ARPOCT)->setValueNotifyingHost(1.0f / 3.0f); // 2 octaves
+        ap.processBlock(b, on);
+        // run until the arp is on its upper-octave step (72): the host's
+        // note-off for 60 can't release that one
+        bool arpSounding = false;
+        for (int i = 0; i < 200 && !arpSounding; ++i)
+        {
+            b.clear(); juce::MidiBuffer e; ap.processBlock(b, e);
+            auto an = ap.getActiveNotes();
+            arpSounding = std::find(an.begin(), an.end(), 72) != an.end();
+        }
+        ap.apvts.getParameter(PP::ARPON)->setValueNotifyingHost(0.0f);
+        juce::MidiBuffer off;
+        off.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+        b.clear(); ap.processBlock(b, off);
+        for (int i = 0; i < 40; ++i) { b.clear(); juce::MidiBuffer e; ap.processBlock(b, e); }
+        check(arpSounding && ap.getActiveNotes().empty() && bufferRMS(b) < 1e-5f,
+              "arp off: no hanging arp note");
+    }
+
+    // ---- regression: mono output bus runs FX once per sample ----
+    {
+        PastelProcessor mp;
+        mp.prepareToPlay(44100.0, 512);
+        juce::String err;
+        mp.loadSoundFile(sfzFile.getFullPathName(), err);
+        mp.apvts.getParameter(PP::DLON)->setValueNotifyingHost(1.0f);
+        mp.apvts.getParameter(PP::RVON)->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> st(2, 512), mo(1, 512);
+        juce::MidiBuffer on;
+        on.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        PastelProcessor sp;
+        sp.prepareToPlay(44100.0, 512);
+        sp.loadSoundFile(sfzFile.getFullPathName(), err);
+        sp.apvts.getParameter(PP::DLON)->setValueNotifyingHost(1.0f);
+        sp.apvts.getParameter(PP::RVON)->setValueNotifyingHost(1.0f);
+        double maxDiff = 0.0;
+        for (int i = 0; i < 40; ++i)
+        {
+            st.clear(); mo.clear();
+            juce::MidiBuffer m1 = i == 0 ? on : juce::MidiBuffer(), m2 = m1;
+            sp.processBlock(st, m1);
+            mp.processBlock(mo, m2);
+            for (int s = 0; s < 512; ++s)
+                maxDiff = juce::jmax(maxDiff, (double) std::abs(mo.getSample(0, s)
+                                     - 0.5f * (st.getSample(0, s) + st.getSample(1, s))));
+        }
+        check(maxDiff < 1e-4, "mono bus == folded stereo render (FX not doubled)");
     }
 
     juce::Logger::writeToLog(failures == 0 ? "ALL TESTS PASSED" : "FAILURES PRESENT");
