@@ -78,16 +78,29 @@ public:
     int getVoiceSwReq(int voiceIdx) const;
     int getCC(int cc) const { return sampler.getCC(cc); }
 
+    // plugin presets: sound file + every parameter (PlayerPresets / PresetBrowser)
+    juce::ValueTree capturePreset();
+    void applyPreset(const juce::ValueTree& preset, const juce::String& name); // invalid tree = Init
+    juce::String getPresetName() const { return apvts.state.getProperty("presetName", "Init").toString(); }
+    void setPresetName(const juce::String& n) { apvts.state.setProperty("presetName", n, nullptr); }
+
     float getOutLevelL() const { return outL; }
     float getOutLevelR() const { return outR; }
     bool isSoundLoaded() const;
 
 private:
+    struct HostTime { double bpm = 120.0, ppq = 0.0; bool playing = false, hasPpq = false; };
     DspParams collectParams();
-    void handleMidi(juce::MidiBuffer& midi, int numSamples, double bpm);
+    void renderWithMidi(juce::AudioBuffer<float>& target, juce::MidiBuffer& midi,
+                        int numSamples, const HostTime& ht);
+    void renderSampler(juce::AudioBuffer<float>& target, int start, int num);
+    void handleEvent(const juce::MidiMessage& msg, bool arpOn);
+    void arpKeyOn(int note, float vel);
+    void arpKeyOff(int note);
     void arpReset();
     void arpReleaseAll(); // note-off for everything the arp is sounding
-    int arpNextNote();
+    bool arpNextNote(int& noteOut, float& velOut);
+    void clearActiveNotes();
     void refreshSamplerSearchPaths();
     void cancelLoadJob();
     void finishLoad(int gen, std::shared_ptr<SamplerEngine> loader,
@@ -96,14 +109,23 @@ private:
     SamplerEngine sampler;
     DSPEngine dsp;
 
-    // arp state
-    std::vector<int> arpHeld;
-    std::vector<std::pair<int,int>> arpPendingOffs; // (note, samplesLeft)
+    // arp state (fixed storage: the audio thread never allocates)
+    static constexpr int arpMaxHeld = 32, arpMaxOffs = 32;
+    int arpHeld[arpMaxHeld] = {};      // pattern keys, in press order
+    float arpHeldVel[arpMaxHeld] = {}; // their played velocities
+    int arpHeldCount = 0;
+    bool arpKeyDown[128] = {};         // physical keys (latch: next press starts a new chord)
+    struct ArpOff { int note; int samplesLeft; };
+    ArpOff arpOffs[arpMaxOffs] = {};   // pending gate-offs
+    int arpOffCount = 0;
     double arpSamplesUntilNext = 0.0;
-    int arpStep = 0;
-    int arpDir = 1;
+    long long arpGridIdx = 0;          // index of the next step on the beat grid
+    long long arpLastGridIdx = 0;      // host-locked: last grid step fired
+    double arpPrevPpq = -1.0e9;
+    int arpStep = 0;                   // position in the pattern
     int arpLastNote = -1;
-    double arpLastBpm = 120.0;
+    bool arpWasOn = false;
+    juce::Random arpRng;
 
     juce::AudioBuffer<float> monoScratch; // stereo render target for mono outputs
 
@@ -111,9 +133,10 @@ private:
     int lastBank = -1, lastPreset = -1;
     float lastA = -1, lastD = -1, lastS = -1, lastR = -1;
     bool lastAdsrOn = false;
+    int lastVoiceMode = -1, lastInterp = -1;
+    float lastGlide = -1.0f;
 
-    juce::CriticalSection activeLock;
-    std::set<int> activeNotes;
+    std::atomic<bool> noteSounding[128] {}; // keys the engine is playing (UI keyboard)
 
     // background sample loading (big banks must not freeze the DAW)
     std::unique_ptr<std::thread> loadThread;

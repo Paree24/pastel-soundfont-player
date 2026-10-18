@@ -59,37 +59,37 @@ bool SamplerEngine::isAdsrEnabled() const
 
 juce::String SamplerEngine::currentPath() const
 {
-    juce::ScopedLock sl(lock);
-    return currentFile;
+    juce::ScopedLock sl(uiLock);
+    return uiPath;
 }
 
 juce::String SamplerEngine::currentName() const
 {
-    juce::ScopedLock sl(lock);
-    if (currentFile.isEmpty()) return "No file loaded";
-    return juce::File(currentFile).getFileName();
+    juce::ScopedLock sl(uiLock);
+    if (uiPath.isEmpty()) return "No file loaded";
+    return juce::File(uiPath).getFileName();
 }
 
 juce::String SamplerEngine::programName() const
 {
-    juce::ScopedLock sl(lock);
-    if (!loaded) return "-";
-    if (loadedSf2 && soundfont != nullptr)
+    juce::ScopedLock sl(uiLock);
+    if (!uiLoaded.load()) return "-";
+    if (!uiPresetNames.empty())
     {
         // report the preset that is actually sounding (a bank/program pair
         // missing from the file leaves the previous preset selected)
-        int idx = tsf_channel_get_preset_index(soundfont, 0);
-        const char* nm = tsf_get_presetname(soundfont, idx);
-        if (nm != nullptr && *nm != 0) return juce::String(nm);
-        return "Preset " + juce::String(pastelTsfPresetNumber(soundfont, idx));
+        int idx = sf2ActiveIdx.load();
+        if (idx < 0 || idx >= (int) uiPresetNames.size()) idx = 0;
+        if (uiPresetNames[(size_t) idx].isNotEmpty()) return uiPresetNames[(size_t) idx];
+        return "Preset " + juce::String(uiPresetNums[(size_t) idx].second);
     }
-    return juce::String(regions.size()) + " regions";
+    return uiProgram;
 }
 
 int SamplerEngine::getPresetCount() const
 {
-    juce::ScopedLock sl(lock);
-    return soundfont != nullptr ? tsf_get_presetcount(soundfont) : 0;
+    juce::ScopedLock sl(uiLock);
+    return (int) uiPresetNames.size();
 }
 
 juce::StringArray SamplerEngine::getPresetNames() const
@@ -101,28 +101,76 @@ juce::StringArray SamplerEngine::getPresetNames() const
 
 std::vector<SamplerEngine::Sf2Preset> SamplerEngine::getSf2Presets() const
 {
-    juce::ScopedLock sl(lock);
-    std::vector<Sf2Preset> out;
-    if (soundfont == nullptr) return out;
-    int count = tsf_get_presetcount(soundfont);
-    for (int i = 0; i < count; ++i)
-        out.push_back({ pastelTsfPresetBank(soundfont, i), pastelTsfPresetNumber(soundfont, i),
-                        juce::String(tsf_get_presetname(soundfont, i)) });
-    std::sort(out.begin(), out.end(), [](const Sf2Preset& a, const Sf2Preset& b)
-    {
-        return a.bank != b.bank ? a.bank < b.bank : a.program < b.program;
-    });
-    return out;
+    juce::ScopedLock sl(uiLock);
+    return uiPresets;
 }
 
 bool SamplerEngine::getActiveSf2Preset(int& bank, int& program) const
 {
-    juce::ScopedLock sl(lock);
-    if (soundfont == nullptr || !loadedSf2) return false;
-    int idx = tsf_channel_get_preset_index(soundfont, 0);
-    bank = pastelTsfPresetBank(soundfont, idx);
-    program = pastelTsfPresetNumber(soundfont, idx);
+    juce::ScopedLock sl(uiLock);
+    int idx = sf2ActiveIdx.load();
+    if (idx < 0 || idx >= (int) uiPresetNums.size()) return false;
+    bank = uiPresetNums[(size_t) idx].first;
+    program = uiPresetNums[(size_t) idx].second;
     return bank >= 0 && program >= 0;
+}
+
+// Snapshot everything the UI asks about, so its polling never touches the
+// audio lock. Lock must be held (lock -> uiLock order, never the reverse).
+void SamplerEngine::publishUiState()
+{
+    auto mergeRanges = [](std::vector<std::pair<int,int>> in)
+    {
+        std::sort(in.begin(), in.end());
+        std::vector<std::pair<int,int>> merged;
+        for (auto& p : in)
+        {
+            if (!merged.empty() && p.first <= merged.back().second + 1)
+                merged.back().second = juce::jmax(merged.back().second, p.second);
+            else merged.push_back(p);
+        }
+        return merged;
+    };
+    std::vector<std::pair<int,int>> mapped, sw;
+    for (auto& r : regions)
+    {
+        mapped.push_back({ r.loKey, r.hiKey });
+        if (r.keyswitch >= 0) sw.push_back({ r.keyswitch, r.keyswitch });
+        if (r.swDown >= 0) sw.push_back({ r.swDown, r.swDown });
+    }
+    for (int k : swLastKeys) sw.push_back({ k, k });
+    std::vector<Sf2Preset> presets;
+    std::vector<juce::String> names;
+    std::vector<std::pair<int,int>> nums;
+    if (soundfont != nullptr && loadedSf2)
+    {
+        int count = tsf_get_presetcount(soundfont);
+        for (int i = 0; i < count; ++i)
+        {
+            int b = pastelTsfPresetBank(soundfont, i), pr = pastelTsfPresetNumber(soundfont, i);
+            juce::String nm(tsf_get_presetname(soundfont, i));
+            presets.push_back({ b, pr, nm });
+            names.push_back(nm);
+            nums.push_back({ b, pr });
+        }
+        std::sort(presets.begin(), presets.end(), [](const Sf2Preset& a, const Sf2Preset& b)
+        {
+            return a.bank != b.bank ? a.bank < b.bank : a.program < b.program;
+        });
+    }
+    {
+        juce::ScopedLock ul(uiLock);
+        uiPath = currentFile;
+        uiProgram = loaded && !loadedSf2 ? juce::String(regions.size()) + " regions" : juce::String("-");
+        uiMapped = mergeRanges(std::move(mapped));
+        uiSwitches = mergeRanges(std::move(sw));
+        uiLabels = swLabels;
+        uiPresets.swap(presets);
+        uiPresetNames.swap(names);
+        uiPresetNums.swap(nums);
+    }
+    sf2ActiveIdx.store(soundfont != nullptr && loadedSf2 ? tsf_channel_get_preset_index(soundfont, 0) : -1);
+    uiLoaded.store(loaded);
 }
 
 void SamplerEngine::setSf2Preset(int bank, int preset)
@@ -136,12 +184,21 @@ void SamplerEngine::setSf2Preset(int bank, int preset)
         // also set a few more channels so multi-channel files behave
         for (int ch = 1; ch < 4; ++ch)
             tsf_channel_set_bank_preset(soundfont, ch, sf2Bank, sf2Preset);
+        sf2ActiveIdx.store(tsf_channel_get_preset_index(soundfont, 0));
     }
 }
 
 bool SamplerEngine::loadFile(const juce::String& path, juce::String& errorOut)
 {
     juce::ScopedLock sl(lock);
+    bool ok = loadFileLocked(path, errorOut);
+    seqGate.assign(regions.size(), 1); // sized here so note-ons never allocate
+    publishUiState();
+    return ok;
+}
+
+bool SamplerEngine::loadFileLocked(const juce::String& path, juce::String& errorOut)
+{
     unloadInternal();
     juce::File f(path);
     if (!f.existsAsFile()) { errorOut = "File not found: " + path; return false; }
@@ -155,6 +212,8 @@ bool SamplerEngine::loadFile(const juce::String& path, juce::String& errorOut)
         tsf_set_output(soundfont, TSF_STEREO_INTERLEAVED, (int) hostRate, 0.0f);
         tsf_set_max_voices(soundfont, 128);
         tsf_channel_set_bank_preset(soundfont, 0, sf2Bank, sf2Preset);
+        if (bendBipolar != 0.0f) // keep a held wheel across loads
+            tsf_channel_set_pitchwheel(soundfont, 0, juce::jlimit(0, 16383, (int) std::lround(8192.0f + bendBipolar * 8192.0f)));
         for (int ch = 1; ch < 4; ++ch)
             tsf_channel_set_bank_preset(soundfont, ch, sf2Bank, sf2Preset);
         loaded = true; loadedSf2 = true; currentFile = f.getFullPathName();
@@ -188,6 +247,7 @@ void SamplerEngine::unload()
 {
     juce::ScopedLock sl(lock);
     unloadInternal();
+    publishUiState();
 }
 
 // must be called with lock held
@@ -196,7 +256,7 @@ void SamplerEngine::unloadInternal()
     for (auto& v : voices) { v.active = false; v.region = -1; }
     regions.clear();
     sampleBuffers.clear();
-    delayed.clear();
+    delayedCount = 0;
     localIndex.clear();
     localPaths.clear();
     swLastKeys.clear();
@@ -210,6 +270,10 @@ void SamplerEngine::unloadInternal()
     std::fill(std::begin(sf2Held), std::end(sf2Held), false);
     sf2HeldCount = 0;
     lastKeyswitch = -1;
+    std::fill(std::begin(sustained), std::end(sustained), false);
+    std::fill(std::begin(keyDown), std::end(keyDown), false);
+    monoCount = 0; monoNote = monoBase = -1;
+    sf2Tune = sf2TuneTarget = 0.0;
     loaded = false; loadedSf2 = false; currentFile = "";
 }
 
@@ -241,9 +305,9 @@ juce::String SamplerEngine::getVoiceSamplePath(int voiceIdx) const
 
 juce::String SamplerEngine::getSwitchLabel(int note) const
 {
-    juce::ScopedLock sl(lock);
-    auto it = swLabels.find(note);
-    return it == swLabels.end() ? juce::String() : it->second;
+    juce::ScopedLock sl(uiLock);
+    auto it = uiLabels.find(note);
+    return it == uiLabels.end() ? juce::String() : it->second;
 }
 
 int SamplerEngine::getVoiceSwReq(int voiceIdx) const
@@ -481,7 +545,6 @@ void SamplerEngine::swapWith(SamplerEngine& other)
     std::swap(soundfont, other.soundfont);
     std::swap(sf2Bank, other.sf2Bank);
     std::swap(sf2Preset, other.sf2Preset);
-    tsfTemp.clear(); other.tsfTemp.clear();
     libIndex.swap(other.libIndex);
     std::swap(libIndexKey, other.libIndexKey);
     std::swap(libIndexedFiles, other.libIndexedFiles);
@@ -489,12 +552,23 @@ void SamplerEngine::swapWith(SamplerEngine& other)
     localIndex.swap(other.localIndex);
     localPaths.swap(other.localPaths);
     std::swap(searchCapped, other.searchCapped);
-    std::swap(lastKeyswitch, other.lastKeyswitch);
+    lastKeyswitch.store(other.lastKeyswitch.exchange(lastKeyswitch.load()));
     swLastKeys.swap(other.swLastKeys);
     swLabels.swap(other.swLabels);
     for (int i = 0; i < 128; ++i) std::swap(ccState[i], other.ccState[i]);
     for (int i = 0; i < 128; ++i) std::swap(lastVel[i], other.lastVel[i]);
-    delayed.swap(other.delayed);
+    for (int i = 0; i < maxDelayed; ++i) std::swap(delayed[i], other.delayed[i]);
+    std::swap(delayedCount, other.delayedCount);
+    // performance state stays with this (live) engine; notes of the old
+    // sound are gone, so their pedal/mono bookkeeping goes too
+    std::fill(std::begin(sustained), std::end(sustained), false);
+    std::fill(std::begin(keyDown), std::end(keyDown), false);
+    monoCount = 0; monoNote = monoBase = -1;
+    sf2Tune = sf2TuneTarget = 0.0;
+    if (soundfont != nullptr && bendBipolar != 0.0f)
+        tsf_channel_set_pitchwheel(soundfont, 0, juce::jlimit(0, 16383, (int) std::lround(8192.0f + bendBipolar * 8192.0f)));
+    seqGate.assign(regions.size(), 1);
+    publishUiState();
 }
 
 bool SamplerEngine::isAudioFile(const juce::File& f)
@@ -775,6 +849,8 @@ bool SamplerEngine::parseSfz(const juce::String& text, const juce::File& sfzDir)
         else if (key == "end") tgt.endSmp = val.getLargeIntValue();
         else if (key == "direction") tgt.direction = val.toLowerCase().contains("reverse") ? 1 : 0;
         else if (key == "pitch_keytrack") tgt.keytrack = val.getIntValue() == 0 ? 0 : 1;
+        else if (key == "bend_up" || key == "bendup") tgt.bendUp = val.getFloatValue();
+        else if (key == "bend_down" || key == "benddown") tgt.bendDown = val.getFloatValue();
         else if (key == "group") tgt.group = val.getIntValue();
         else if (key == "off_by" || key == "offby") tgt.offBy = val.getIntValue();
         else if (key == "off_mode")
@@ -1130,8 +1206,7 @@ bool SamplerEngine::fireNote(int note, float vel01, int wantTrigger, bool allowD
         const auto& reg = regions[(size_t) rIdx];
         if (allowDelay && reg.delaySec > 0.0f)
         {
-            delayed.push_back({ rIdx, note, vel, wantTrigger, (int)(reg.delaySec * hostRate) });
-            if (delayed.size() > 64) delayed.erase(delayed.begin());
+            pushDelayed({ rIdx, note, vel, wantTrigger, (int)(reg.delaySec * hostRate) });
             any = true;
         }
         else if (startVoice(rIdx, note, vel, wantTrigger == 0))
@@ -1189,7 +1264,16 @@ bool SamplerEngine::ccOk(const SfzRegion& r) const
 void SamplerEngine::setCC(int cc, int value)
 {
     juce::ScopedLock sl(lock);
-    if (cc >= 0 && cc < 128) ccState[cc] = juce::jlimit(0, 127, value);
+    if (cc < 0 || cc >= 128) return;
+    value = juce::jlimit(0, 127, value);
+    ccState[cc] = value;
+    // SF2: tsf gets the channel controllers (volume 7, pan 10, expression 11,
+    // RPN pitch-bend range...). Sustain stays ours (setSustain also holds the
+    // ADSR master EG), bank select stays with the Bank parameter, and
+    // all-notes/sound-off are handled by the processor.
+    if (loadedSf2 && soundfont != nullptr && cc != 0 && cc != 32 && cc != 64
+        && cc != 120 && cc != 123)
+        tsf_channel_midi_control(soundfont, 0, cc, value);
 }
 
 int SamplerEngine::getCC(int cc) const
@@ -1200,51 +1284,209 @@ int SamplerEngine::getCC(int cc) const
 
 int SamplerEngine::getLastKeyswitch() const
 {
-    juce::ScopedLock sl(lock);
-    return lastKeyswitch;
+    return lastKeyswitch.load();
 }
 
 std::vector<std::pair<int,int>> SamplerEngine::getMappedRanges() const
 {
-    juce::ScopedLock sl(lock);
-    std::vector<std::pair<int,int>> out;
-    for (auto& r : regions) out.push_back({ r.loKey, r.hiKey });
-    std::sort(out.begin(), out.end());
-    std::vector<std::pair<int,int>> merged;
-    for (auto& p : out)
-    {
-        if (!merged.empty() && p.first <= merged.back().second + 1)
-            merged.back().second = juce::jmax(merged.back().second, p.second);
-        else merged.push_back(p);
-    }
-    return merged;
+    juce::ScopedLock sl(uiLock);
+    return uiMapped;
 }
 
 std::vector<std::pair<int,int>> SamplerEngine::getSwitchRanges() const
 {
+    juce::ScopedLock sl(uiLock);
+    return uiSwitches;
+}
+
+void SamplerEngine::pushDelayed(const DelayedNote& d)
+{
+    if (delayedCount >= maxDelayed) // full: drop the oldest
+    {
+        for (int i = 1; i < delayedCount; ++i) delayed[i - 1] = delayed[i];
+        --delayedCount;
+    }
+    delayed[delayedCount++] = d;
+}
+
+// ---------------- performance controls ----------------
+void SamplerEngine::setPitchBend(float bipolar)
+{
     juce::ScopedLock sl(lock);
-    std::vector<std::pair<int,int>> out;
-    for (auto& r : regions)
-    {
-        if (r.keyswitch >= 0) out.push_back({ r.keyswitch, r.keyswitch });
-        if (r.swDown >= 0) out.push_back({ r.swDown, r.swDown });
-    }
-    for (int k : swLastKeys) out.push_back({ k, k });
-    std::sort(out.begin(), out.end());
-    std::vector<std::pair<int,int>> merged;
-    for (auto& p : out)
-    {
-        if (!merged.empty() && p.first <= merged.back().second + 1)
-            merged.back().second = juce::jmax(merged.back().second, p.second);
-        else merged.push_back(p);
-    }
-    return merged;
+    bendBipolar = juce::jlimit(-1.0f, 1.0f, bipolar);
+    if (loadedSf2 && soundfont != nullptr)
+        tsf_channel_set_pitchwheel(soundfont, 0, juce::jlimit(0, 16383, (int) std::lround(8192.0f + bendBipolar * 8192.0f)));
+}
+
+void SamplerEngine::setSustain(bool down)
+{
+    juce::ScopedLock sl(lock);
+    if (down == sustainDown) return;
+    sustainDown = down;
+    if (down) return;
+    for (int n = 0; n < 128; ++n)
+        if (sustained[n])
+        {
+            sustained[n] = false;
+            if (!keyDown[n]) releaseNote(n);
+        }
+}
+
+void SamplerEngine::setVoiceMode(int mode, float glide)
+{
+    juce::ScopedLock sl(lock);
+    mode = juce::jlimit(0, 2, mode);
+    glideSecs = juce::jmax(0.0f, glide);
+    if (mode == voiceMode) return;
+    voiceMode = mode;
+    monoCount = 0; monoNote = monoBase = -1; // held keys fall back to plain note-offs
+}
+
+void SamplerEngine::setInterpolation(int mode)
+{
+    juce::ScopedLock sl(lock);
+    interpMode = juce::jlimit(0, 2, mode);
+}
+
+void SamplerEngine::setSf2Tune(double now, double target)
+{
+    sf2Tune = now;
+    sf2TuneTarget = target;
+    sf2TuneRate = glideSecs > 0.0 ? std::abs(target - now) / (glideSecs * hostRate) : 0.0;
+    if (sf2TuneRate <= 0.0) sf2Tune = target;
+    if (soundfont != nullptr) tsf_channel_set_tuning(soundfont, 0, (float) sf2Tune);
+}
+
+// pitch (MIDI note, fractional) the mono voice sounds right now: the glide
+// origin for the next note
+double SamplerEngine::monoCurrentPitch() const
+{
+    if (monoBase < 0) return monoPitch;
+    if (loadedSf2) return monoBase + sf2Tune;
+    for (auto& v : voices)
+        if (v.active && v.note == monoNote && !v.env.isReleasing())
+            return monoBase + v.glideSemis;
+    return monoPitch;
+}
+
+void SamplerEngine::monoRetune(int newNote)
+{
+    double target = (double) (newNote - monoBase);
+    if (loadedSf2) setSf2Tune(sf2Tune, target);
+    else
+        for (auto& v : voices)
+        {
+            if (!v.active || v.note != monoNote || v.env.isReleasing() || v.trigType != 0) continue;
+            v.note = newNote; // its key now releases it
+            v.glideTarget = target;
+            v.glideRate = glideSecs > 0.0 ? std::abs(target - v.glideSemis) / (glideSecs * hostRate) : 0.0;
+            if (v.glideRate <= 0.0) v.glideSemis = target;
+        }
+    monoPitch = newNote;
+}
+
+void SamplerEngine::monoRelease()
+{
+    if (monoBase < 0) return;
+    // SFZ voices follow the retuned key; tsf keeps them under the start key
+    playNoteOff(loadedSf2 ? monoBase : monoNote);
+}
+
+void SamplerEngine::monoStart(int note, float vel, double fromPitch)
+{
+    bool glide = glideSecs > 0.0 && fromPitch >= 0.0;
+    double offset = glide ? fromPitch - note : 0.0;
+    if (loadedSf2) setSf2Tune(offset, 0.0); // before note-on: the voice starts detuned
+    juce::uint32 before = voiceCounter;
+    playNoteOn(note, vel);
+    if (!loadedSf2)
+        for (auto& v : voices)
+            if (v.active && v.startedAt > before)
+            {
+                v.glideSemis = offset;
+                v.glideTarget = 0.0;
+                v.glideRate = glide ? std::abs(offset) / (glideSecs * hostRate) : 0.0;
+            }
+    monoBase = note;
+    monoPitch = note;
 }
 
 void SamplerEngine::noteOn(int midiNote, float velocity01)
 {
     juce::ScopedLock sl(lock);
+    if (midiNote < 0 || midiNote > 127) return;
     float vel = juce::jlimit(0.0f, 1.0f, velocity01);
+    keyDown[midiNote] = true;
+    sustained[midiNote] = false;
+    lastVel[midiNote] = (int) std::round(vel * 127.0f);
+    // poly, or a pure articulation switch: straight through
+    if (voiceMode == 0 || !loaded || (!loadedSf2 && isSwitchKey(midiNote)))
+    {
+        playNoteOn(midiNote, vel);
+        return;
+    }
+    // mono / legato: last-note priority over the held-key stack
+    int k = 0;
+    for (int i = 0; i < monoCount; ++i) if (monoStack[i] != midiNote) monoStack[k++] = monoStack[i];
+    monoCount = k;
+    if (monoCount < 128) monoStack[monoCount++] = midiNote;
+    double from = monoCurrentPitch();
+    if (voiceMode == 2 && monoNote >= 0) monoRetune(midiNote); // overlapping: slide, no retrigger
+    else
+    {
+        monoRelease();
+        // mono glides from the last note even after a release; legato only
+        // when the notes overlap
+        monoStart(midiNote, vel, voiceMode == 1 ? from : -1.0);
+    }
+    monoNote = midiNote;
+}
+
+void SamplerEngine::noteOff(int midiNote)
+{
+    juce::ScopedLock sl(lock);
+    if (midiNote < 0 || midiNote > 127) return;
+    keyDown[midiNote] = false;
+    if (sustainDown) { sustained[midiNote] = true; return; } // pedal holds it
+    releaseNote(midiNote);
+}
+
+// key (or pedal) release below the sustain layer; lock must be held
+void SamplerEngine::releaseNote(int midiNote)
+{
+    bool stacked = false;
+    for (int i = 0; i < monoCount; ++i) if (monoStack[i] == midiNote) { stacked = true; break; }
+    if (voiceMode == 0 || !stacked)
+    {
+        playNoteOff(midiNote);
+        return;
+    }
+    int k = 0;
+    for (int i = 0; i < monoCount; ++i) if (monoStack[i] != midiNote) monoStack[k++] = monoStack[i];
+    monoCount = k;
+    if (midiNote != monoNote) return; // a key under the sounding one went up
+    if (monoCount > 0)
+    {
+        // fall back to the previous held key
+        int prev = monoStack[monoCount - 1];
+        if (voiceMode == 2) monoRetune(prev);
+        else
+        {
+            double from = monoCurrentPitch();
+            monoRelease();
+            monoStart(prev, lastVel[prev] / 127.0f, from);
+        }
+        monoNote = prev;
+    }
+    else
+    {
+        monoRelease();
+        monoNote = -1;
+    }
+}
+
+void SamplerEngine::playNoteOn(int midiNote, float vel)
+{
     if (loadedSf2 && soundfont != nullptr)
     {
         tsf_channel_note_on(soundfont, 0, midiNote, juce::jmax(0.01f, vel));
@@ -1260,7 +1502,6 @@ void SamplerEngine::noteOn(int midiNote, float velocity01)
     // range inside sw_lokey..sw_hikey, so a switch key must still trigger
     // matching regions (pure switch keys match nothing and stay silent).
     if (isSwitchKey(midiNote)) lastKeyswitch = midiNote;
-    if (midiNote >= 0 && midiNote < 128) lastVel[midiNote] = (int) std::round(vel * 127.0f);
     fireNote(midiNote, vel, 0, true);
 }
 
@@ -1389,6 +1630,8 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool from
         vp->filtRes = r.filtRes;
         vp->vcf[0].reset(); vp->vcf[1].reset();
     }
+    vp->glideSemis = vp->glideTarget = vp->glideRate = 0.0;
+    vp->curRatio = vp->ratio;
     vp->env.noteOn();
     vp->active = true;
     vp->startedAt = ++voiceCounter;
@@ -1397,9 +1640,8 @@ bool SamplerEngine::startVoice(int regionIdx, int midiNote, float vel, bool from
     return true;
 }
 
-void SamplerEngine::noteOff(int midiNote)
+void SamplerEngine::playNoteOff(int midiNote)
 {
-    juce::ScopedLock sl(lock);
     if (loadedSf2 && soundfont != nullptr)
     {
         tsf_channel_note_off(soundfont, 0, midiNote);
@@ -1433,6 +1675,9 @@ void SamplerEngine::noteOff(int midiNote)
 void SamplerEngine::allNotesOff()
 {
     juce::ScopedLock sl(lock);
+    std::fill(std::begin(sustained), std::end(sustained), false);
+    std::fill(std::begin(keyDown), std::end(keyDown), false);
+    monoCount = 0; monoNote = monoBase = -1;
     if (loadedSf2 && soundfont != nullptr)
     {
         tsf_note_off_all(soundfont);
@@ -1443,22 +1688,67 @@ void SamplerEngine::allNotesOff()
     }
     for (auto& v : voices)
         if (v.active) v.env.noteOff();
-    delayed.clear();
+    delayedCount = 0;
 }
 
 void SamplerEngine::panic()
 {
     juce::ScopedLock sl(lock);
     for (auto& v : voices) { v.active = false; v.env.reset(); }
-    delayed.clear();
+    delayedCount = 0;
+    std::fill(std::begin(sustained), std::end(sustained), false);
+    std::fill(std::begin(keyDown), std::end(keyDown), false);
+    monoCount = 0; monoNote = monoBase = -1;
+    sustainDown = false;
+    bendBipolar = 0.0f;
+    sf2Tune = sf2TuneTarget = 0.0;
     if (soundfont != nullptr)
     {
         for (int ch = 0; ch < 4; ++ch) tsf_channel_sounds_off_all(soundfont, ch);
+        tsf_channel_set_pitchwheel(soundfont, 0, 8192);
+        tsf_channel_set_tuning(soundfont, 0, 0.0f);
         sf2MasterEg.reset();
         sf2EgGate = false;
     }
     std::fill(std::begin(sf2Held), std::end(sf2Held), false);
     sf2HeldCount = 0;
+}
+
+namespace
+{
+// Blackman-windowed sinc, 8 zero crossings each side (Chroma's Sinc HQ table)
+struct SincTable
+{
+    static constexpr int Z = 8, RES = 512;
+    std::vector<float> t;
+    SincTable()
+    {
+        t.resize((size_t) (Z * RES + 2));
+        for (int i = 0; i < (int) t.size(); ++i)
+        {
+            double u = (double) i / RES;
+            double s = u == 0.0 ? 1.0 : std::sin(juce::MathConstants<double>::pi * u) / (juce::MathConstants<double>::pi * u);
+            double w = u >= Z ? 0.0 : 0.42 + 0.5 * std::cos(juce::MathConstants<double>::pi * u / Z)
+                                    + 0.08 * std::cos(2.0 * juce::MathConstants<double>::pi * u / Z);
+            t[(size_t) i] = (float) (s * w);
+        }
+    }
+    float at(float u) const
+    {
+        u = std::abs(u);
+        if (u >= (float) Z) return 0.0f;
+        float f = u * RES;
+        int i = (int) f;
+        float fr = f - (float) i;
+        return t[(size_t) i] + (t[(size_t) i + 1] - t[(size_t) i]) * fr;
+    }
+};
+const SincTable& sincTable()
+{
+    static SincTable s; // built on first use: touched in the constructor below
+    return s;
+}
+struct SincWarmup { SincWarmup() { sincTable(); } } sincWarmup; // never built on the audio thread
 }
 
 void SamplerEngine::renderAdding(float* destL, float* destR, int numSamples)
@@ -1467,92 +1757,163 @@ void SamplerEngine::renderAdding(float* destL, float* destR, int numSamples)
     if (!loaded) return;
     if (loadedSf2 && soundfont != nullptr)
     {
-        size_t need = (size_t) numSamples * 2;
-        if (tsfTemp.size() < need) tsfTemp.resize(need);
-        tsf_render_float(soundfont, tsfTemp.data(), numSamples, 0);
+        renderSf2(destL, destR, numSamples);
+        return;
+    }
+    // delayed region starts (delay=) land on their exact sample: render up
+    // to the earliest one due, start it (stored region first, full re-search
+    // fallback if it became unstartable), carry on
+    int done = 0;
+    while (done < numSamples)
+    {
+        int seg = numSamples - done;
+        for (int k = 0; k < delayedCount; ++k) seg = juce::jmin(seg, juce::jmax(0, delayed[k].samplesLeft));
+        if (seg > 0)
+        {
+            renderVoices(destL + done, destR + done, seg);
+            done += seg;
+            for (int k = 0; k < delayedCount; ++k) delayed[k].samplesLeft -= seg;
+        }
+        for (int k = 0; k < delayedCount;)
+        {
+            if (delayed[k].samplesLeft > 0) { ++k; continue; }
+            DelayedNote d = delayed[k];
+            for (int j = k + 1; j < delayedCount; ++j) delayed[j - 1] = delayed[j];
+            --delayedCount;
+            if (!startVoice(d.regionIdx, d.note, d.vel, d.trigger == 0))
+                fireNote(d.note, d.vel, d.trigger, false, false);
+        }
+    }
+}
+
+void SamplerEngine::renderSf2(float* destL, float* destR, int numSamples)
+{
+    for (int done = 0; done < numSamples;)
+    {
+        const int n = juce::jmin(tsfChunk, numSamples - done);
+        if (sf2Tune != sf2TuneTarget) // mono glide: channel tuning slides per chunk
+        {
+            double step = sf2TuneRate * n;
+            if (step <= 0.0 || std::abs(sf2TuneTarget - sf2Tune) <= step) sf2Tune = sf2TuneTarget;
+            else sf2Tune += sf2TuneTarget > sf2Tune ? step : -step;
+            tsf_channel_set_tuning(soundfont, 0, (float) sf2Tune);
+        }
+        tsf_render_float(soundfont, tsfTemp, n, 0);
         bool egActive = adsrOn && sf2MasterEg.isActive();
-        for (int i = 0; i < numSamples; ++i)
+        for (int i = 0; i < n; ++i)
         {
             float eg = 1.0f;
             if (adsrOn && (sf2EgGate || egActive)) { eg = sf2MasterEg.next(); egActive = sf2MasterEg.isActive(); }
-            destL[i] += tsfTemp[(size_t) i * 2] * eg;
-            destR[i] += tsfTemp[(size_t) i * 2 + 1] * eg;
+            destL[done + i] += tsfTemp[i * 2] * eg;
+            destR[done + i] += tsfTemp[i * 2 + 1] * eg;
         }
-        // envelope finished with no gate: allow the next noteOn to retrigger
-        if (!sf2MasterEg.isActive()) sf2EgGate = false;
-        return;
+        done += n;
     }
-    // fire delayed region starts (timing slop < 1 block): the stored
-    // region first, full re-search fallback if it became unstartable
-    if (!delayed.empty())
+    // envelope finished with no gate: allow the next noteOn to retrigger
+    if (!sf2MasterEg.isActive()) sf2EgGate = false;
+}
+
+void SamplerEngine::renderVoices(float* destL, float* destR, int numSamples)
+{
+    constexpr int chunk = 32; // bend / glide resolution
+    const auto& sinc = sincTable();
+    for (int c0 = 0; c0 < numSamples; c0 += chunk)
     {
-        for (auto it = delayed.begin(); it != delayed.end();)
-        {
-            it->samplesLeft -= numSamples;
-            if (it->samplesLeft <= 0)
-            {
-                if (!startVoice(it->regionIdx, it->note, it->vel, it->trigger == 0))
-                    fireNote(it->note, it->vel, it->trigger, false, false);
-                it = delayed.erase(it);
-            }
-            else ++it;
-        }
-    }
-    for (int i = 0; i < numSamples; ++i)
-    {
-        float l = 0.0f, r = 0.0f;
+        const int cn = juce::jmin(chunk, numSamples - c0);
+        // per-voice playback ratio for this chunk: bend (bend_up/bend_down
+        // cents) + mono glide (pitch-tracking regions only)
         for (auto& v : voices)
         {
-            if (!v.active) continue;
-            if (v.region < 0 || v.region >= (int) regions.size()) { v.active = false; continue; }
+            if (!v.active || v.region < 0 || v.region >= (int) regions.size()) continue;
             const SfzRegion& reg = regions[(size_t) v.region];
-            const auto& buf = sampleBuffers[(size_t) reg.sampleIndex];
-            int frames = buf.getNumSamples();
-            if (frames <= 0) { v.active = false; continue; }
-            float env = v.env.next();
-            if (!v.env.isActive()) { v.active = false; continue; }
-            int p0 = (int) v.pos;
-            float frac = (float)(v.pos - p0);
-            bool loopOn = reg.loopMode == 1 && v.dir > 0;
-            int loopEnd = (int) juce::jmin((juce::int64) v.stopSamp, reg.loopEnd);
-            double loopBase = juce::jmax((double) v.startSamp, (double) reg.loopStart);
-            auto readCh = [&](int ch) -> float
+            double semis = 0.0;
+            if (reg.keytrack != 0)
             {
-                int c = juce::jmin(ch, buf.getNumChannels() - 1);
-                const float* d = buf.getReadPointer(c);
-                float s0 = (p0 >= v.startSamp && p0 < v.stopSamp) ? d[p0] : 0.0f;
-                int p1 = p0 + 1;
-                float s1 = 0.0f;
-                if (loopOn && loopEnd > loopBase && loopEnd <= frames)
+                if (v.glideSemis != v.glideTarget)
                 {
-                    if (p1 >= loopEnd) s1 = d[(int) loopBase];
-                    else s1 = (p1 < v.stopSamp) ? d[p1] : 0.0f;
+                    double step = v.glideRate * cn;
+                    if (step <= 0.0 || std::abs(v.glideTarget - v.glideSemis) <= step) v.glideSemis = v.glideTarget;
+                    else v.glideSemis += v.glideTarget > v.glideSemis ? step : -step;
                 }
-                else s1 = (p1 < v.stopSamp) ? d[p1] : 0.0f;
-                return s0 + (s1 - s0) * frac;
-            };
-            float sL = readCh(0);
-            float sR = buf.getNumChannels() > 1 ? readCh(1) : sL;
-            if (v.filtOn) // region filter runs pre-gain, per channel
-            {
-                sL = v.vcf[0].process(sL, v.cutHz, v.filtRes, hostRate, v.filtType);
-                sR = v.vcf[1].process(sR, v.cutHz, v.filtRes, hostRate, v.filtType);
+                semis += v.glideSemis;
             }
-            l += sL * v.gainL * env;
-            r += sR * v.gainR * env;
-            v.pos += v.dir * v.ratio;
-            if (loopOn && loopEnd > loopBase)
-            {
-                if (v.pos >= loopEnd)
-                    v.pos = loopBase + std::fmod(v.pos - loopBase, (double)(loopEnd - loopBase));
-            }
-            else if ((v.dir > 0 && v.pos >= v.stopSamp) || (v.dir < 0 && v.pos < v.startSamp))
-            {
-                v.env.noteOff();
-                v.active = false; // sample end reached
-            }
+            if (bendBipolar != 0.0f)
+                semis += (bendBipolar > 0.0f ? bendBipolar * reg.bendUp : -bendBipolar * reg.bendDown) / 100.0;
+            v.curRatio = semis == 0.0 ? v.ratio : v.ratio * std::exp2(semis / 12.0);
         }
-        destL[i] += l;
-        destR[i] += r;
+        for (int i = c0; i < c0 + cn; ++i)
+        {
+            float l = 0.0f, r = 0.0f;
+            for (auto& v : voices)
+            {
+                if (!v.active) continue;
+                if (v.region < 0 || v.region >= (int) regions.size()) { v.active = false; continue; }
+                const SfzRegion& reg = regions[(size_t) v.region];
+                const auto& buf = sampleBuffers[(size_t) reg.sampleIndex];
+                int frames = buf.getNumSamples();
+                if (frames <= 0) { v.active = false; continue; }
+                float env = v.env.next();
+                if (!v.env.isActive()) { v.active = false; continue; }
+                int p0 = (int) v.pos;
+                float frac = (float)(v.pos - p0);
+                bool loopOn = reg.loopMode == 1 && v.dir > 0;
+                int loopEnd = (int) juce::jmin((juce::int64) v.stopSamp, reg.loopEnd);
+                double loopBase = juce::jmax((double) v.startSamp, (double) reg.loopStart);
+                const bool wrap = loopOn && loopEnd > loopBase && loopEnd <= frames;
+                const int loopLen = juce::jmax(1, loopEnd - (int) loopBase);
+                // sample j of the played span: loop wraps past loop_end, silence outside
+                auto at = [&](const float* d, int j) -> float
+                {
+                    if (wrap && j >= loopEnd) j = (int) loopBase + (j - loopEnd) % loopLen;
+                    return (j >= v.startSamp && j < v.stopSamp) ? d[j] : 0.0f;
+                };
+                auto readCh = [&](int ch) -> float
+                {
+                    int c = juce::jmin(ch, buf.getNumChannels() - 1);
+                    const float* d = buf.getReadPointer(c);
+                    if (interpMode == 1) // cubic (Catmull-Rom)
+                    {
+                        float xm1 = at(d, p0 - 1), x0 = at(d, p0), x1 = at(d, p0 + 1), x2 = at(d, p0 + 2);
+                        float c1 = 0.5f * (x1 - xm1);
+                        float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
+                        float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
+                        return ((c3 * frac + c2) * frac + c1) * frac + x0;
+                    }
+                    if (interpMode == 2) // windowed sinc, cutoff follows the step when pitching up
+                    {
+                        float fc = v.curRatio > 1.0 ? (float) (1.0 / v.curRatio) : 1.0f;
+                        int H = juce::jmin(64, (int) std::ceil(SincTable::Z / fc));
+                        float sum = 0.0f;
+                        for (int j = p0 - H + 1; j <= p0 + H; ++j)
+                            sum += at(d, j) * sinc.at((float) (v.pos - j) * fc);
+                        return sum * fc;
+                    }
+                    float s0 = at(d, p0), s1 = at(d, p0 + 1);
+                    return s0 + (s1 - s0) * frac;
+                };
+                float sL = readCh(0);
+                float sR = buf.getNumChannels() > 1 ? readCh(1) : sL;
+                if (v.filtOn) // region filter runs pre-gain, per channel
+                {
+                    sL = v.vcf[0].process(sL, v.cutHz, v.filtRes, hostRate, v.filtType);
+                    sR = v.vcf[1].process(sR, v.cutHz, v.filtRes, hostRate, v.filtType);
+                }
+                l += sL * v.gainL * env;
+                r += sR * v.gainR * env;
+                v.pos += v.dir * v.curRatio;
+                if (loopOn && loopEnd > loopBase)
+                {
+                    if (v.pos >= loopEnd)
+                        v.pos = loopBase + std::fmod(v.pos - loopBase, (double)(loopEnd - loopBase));
+                }
+                else if ((v.dir > 0 && v.pos >= v.stopSamp) || (v.dir < 0 && v.pos < v.startSamp))
+                {
+                    v.env.noteOff();
+                    v.active = false; // sample end reached
+                }
+            }
+            destL[i] += l;
+            destR[i] += r;
+        }
     }
 }

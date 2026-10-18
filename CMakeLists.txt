@@ -57,6 +57,8 @@ target_sources(PastelPlayer PRIVATE
   Source/FileLibrary.cpp
   Source/Parameters.cpp
   Source/PianoStrip.cpp
+  Source/PlayerPresets.cpp
+  Source/PresetBrowser.cpp
 )
 
 target_include_directories(PastelPlayer PRIVATE Source)
@@ -87,6 +89,8 @@ target_sources(PastelHarness PRIVATE
   Source/FileLibrary.cpp
   Source/Parameters.cpp
   Source/PianoStrip.cpp
+  Source/PlayerPresets.cpp
+  Source/PresetBrowser.cpp
   Test/Harness.cpp
 )
 target_include_directories(PastelHarness PRIVATE Source)
@@ -101,3 +105,10 @@ target_link_libraries(PastelHarness PRIVATE
   juce::juce_data_structures
   PastelAssets
 )
+
+# HostCheck: loads the built .vst3 through JUCE's VST3 hosting (dev only, CI)
+add_executable(HostCheck HostCheck.cpp)
+target_include_directories(HostCheck PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/PastelPlayer_artefacts/JuceLibraryCode)
+target_link_libraries(HostCheck PRIVATE juce::juce_audio_utils juce::juce_audio_processors juce::juce_recommended_config_flags)
+target_compile_definitions(HostCheck PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1)
+add_dependencies(HostCheck PastelPlayer)

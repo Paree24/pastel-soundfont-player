@@ -54,6 +54,13 @@ jobs:
         # Real-bank checks skip automatically when the commercial bank is
         # absent; all synthetic-fixture checks must pass.
 
+      - name: HostCheck (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y xvfb
+          cmake --build build --config Release --target HostCheck --parallel
+          xvfb-run -a ./build/HostCheck "build/PastelPlayer_artefacts/Release/VST3/Pastel Soundfont Player.vst3"
+
       - name: Package
         run: |
           mkdir -p "${{ github.workspace }}/dist"

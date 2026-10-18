@@ -4,6 +4,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "../Source/PluginProcessor.h"
 #include "../Source/Parameters.h"
+#include "../Source/PlayerPresets.h"
 #include <vector>
 #include <cstring>
 #include <cstdlib>
@@ -108,6 +109,10 @@ static void renderTakeStereo(PastelProcessor& proc, int note, float vel, int blo
             outR.push_back(bufB.getSample(1, s));
         }
     }
+    // host-style latency compensation (master limiter lookahead)
+    const int lat = juce::jmin((int) outL.size(), proc.getLatencySamples());
+    outL.erase(outL.begin(), outL.begin() + lat);
+    outR.erase(outR.begin(), outR.begin() + lat);
 }
 
 // render a held note, return the FULL mono take (all blocks concatenated)
@@ -126,6 +131,8 @@ static std::vector<float> renderTake(PastelProcessor& proc, int note, float vel,
         for (int s = 0; s < 512; ++s)
             out.push_back(0.5f * (bufB.getSample(0, s) + bufB.getSample(1, s)));
     }
+    // host-style latency compensation (master limiter lookahead)
+    out.erase(out.begin(), out.begin() + juce::jmin((int) out.size(), proc.getLatencySamples()));
     return out;
 }
 
@@ -2700,6 +2707,242 @@ int main(int argc, char** argv)
                                      - 0.5f * (st.getSample(0, s) + st.getSample(1, s))));
         }
         check(maxDiff < 1e-4, "mono bus == folded stereo render (FX not doubled)");
+    }
+
+    // ---- performance MIDI: bend, sustain, sample-accurate timing ----
+    {
+        PastelProcessor pp;
+        pp.prepareToPlay(44100.0, 512);
+        juce::String err;
+        check(pp.loadSoundFile(sfzFile.getFullPathName(), err), "perf fixture loads");
+        check(pp.getBusCount(true) == 0, "no audio input bus (instrument)");
+        check(dynamic_cast<juce::AudioParameterInt*>(pp.apvts.getParameter(PP::PRESET)) != nullptr
+              && dynamic_cast<juce::AudioParameterInt*>(pp.apvts.getParameter(PP::BANK)) != nullptr,
+              "Preset/Bank are int parameters");
+        const int lat = pp.getLatencySamples();
+        check(lat > 0, "limiter lookahead reported as latency");
+        auto block = [&](juce::MidiBuffer m) { juce::AudioBuffer<float> b(2, 512); b.clear(); pp.processBlock(b, m); return b; };
+
+        // pitch bend: full up = +200 cents (sfz bend_up default)
+        juce::MidiBuffer on; on.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        block(on);
+        for (int i = 0; i < 4; ++i) block({});
+        auto b0 = block({});
+        float f0 = estimateFreq(b0.getReadPointer(0), 512, 44100.0);
+        juce::MidiBuffer bend; bend.addEvent(juce::MidiMessage::pitchWheel(1, 16383), 0);
+        block(bend);
+        for (int i = 0; i < 4; ++i) block({});
+        auto b1 = block({});
+        float f1 = estimateFreq(b1.getReadPointer(0), 512, 44100.0);
+        juce::Logger::writeToLog("bend f0=" + juce::String(f0) + " f1=" + juce::String(f1));
+        check(std::abs(f1 / f0 - std::pow(2.0f, 200.0f / 1200.0f)) < 0.03f, "pitch bend +2 st on an sfz");
+        juce::MidiBuffer centre; centre.addEvent(juce::MidiMessage::pitchWheel(1, 8192), 0);
+        block(centre);
+        pp.panic();
+
+        // CC64: a key released under the pedal keeps sounding until pedal-up
+        juce::MidiBuffer down;
+        down.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        down.addEvent(juce::MidiMessage::controllerEvent(1, 64, 127), 10);
+        down.addEvent(juce::MidiMessage::noteOff(1, 60), 100);
+        block(down);
+        for (int i = 0; i < 10; ++i) block({});
+        float held = bufferRMS(*std::make_unique<juce::AudioBuffer<float>>(block({})));
+        juce::MidiBuffer up; up.addEvent(juce::MidiMessage::controllerEvent(1, 64, 0), 0);
+        block(up);
+        for (int i = 0; i < 20; ++i) block({});
+        float after = bufferRMS(*std::make_unique<juce::AudioBuffer<float>>(block({})));
+        check(held > 0.05f && after < 1e-4f, "sustain pedal holds, pedal-up releases");
+        pp.panic();
+        for (int i = 0; i < 4; ++i) block({});
+
+        // a note stamped at sample 300 starts on sample 300 (+ reported latency)
+        juce::MidiBuffer late; late.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 300);
+        std::vector<float> take;
+        for (int i = 0; i < 2; ++i)
+        {
+            auto b = block(i == 0 ? late : juce::MidiBuffer());
+            for (int s = 0; s < 512; ++s) take.push_back(b.getSample(0, s));
+        }
+        int onset = -1;
+        for (int s = 0; s < (int) take.size(); ++s) if (std::abs(take[(size_t) s]) > 1e-6f) { onset = s; break; }
+        juce::Logger::writeToLog("onset=" + juce::String(onset) + " expect " + juce::String(300 + lat));
+        check(std::abs(onset - (300 + lat)) <= 1, "note-on is sample-accurate");
+        pp.panic();
+    }
+
+    // ---- limiter ceiling: hot stacks stay at -0.3 dBFS ----
+    {
+        PastelProcessor lp;
+        lp.prepareToPlay(44100.0, 512);
+        juce::String err;
+        lp.loadSoundFile(sfzFile.getFullPathName(), err);
+        lp.apvts.getParameter(PP::VOLUME)->setValueNotifyingHost(1.0f);
+        juce::MidiBuffer chord;
+        for (int n : { 48, 52, 55, 60, 64, 67, 72 }) chord.addEvent(juce::MidiMessage::noteOn(1, n, 1.0f), 0);
+        float pk = 0;
+        for (int i = 0; i < 30; ++i)
+        {
+            juce::AudioBuffer<float> b(2, 512); b.clear();
+            juce::MidiBuffer m = i == 0 ? chord : juce::MidiBuffer();
+            lp.processBlock(b, m);
+            pk = juce::jmax(pk, bufferPeak(b));
+        }
+        juce::Logger::writeToLog("limiter peak=" + juce::String(pk));
+        check(pk > 0.8f && pk <= 0.9662f, "lookahead limiter holds the -0.3 dBFS ceiling");
+    }
+
+    // ---- voice modes: mono keeps one voice, legato slides without retrigger ----
+    {
+        PastelProcessor vp;
+        vp.prepareToPlay(44100.0, 512);
+        juce::String err;
+        vp.loadSoundFile(sfzFile.getFullPathName(), err);
+        auto setChoice = [&](const char* id, int idx)
+        {
+            auto* prm = vp.apvts.getParameter(id);
+            prm->setValueNotifyingHost(prm->convertTo0to1((float) idx));
+        };
+        auto run = [&](juce::MidiBuffer m, int blocks)
+        {
+            juce::AudioBuffer<float> b(2, 512);
+            for (int i = 0; i < blocks; ++i) { b.clear(); juce::MidiBuffer mm = i == 0 ? m : juce::MidiBuffer(); vp.processBlock(b, mm); }
+            return b;
+        };
+        setChoice(PP::VMODE, 1);
+        juce::MidiBuffer two;
+        two.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        two.addEvent(juce::MidiMessage::noteOn(1, 64, 0.9f), 200);
+        run(two, 8);
+        auto active = vp.getActiveNotes();
+        juce::Logger::writeToLog("mono voices=" + juce::String(vp.activeVoiceCount()));
+        check(vp.activeVoiceCount() == 1, "mono: one voice for two held keys");
+        vp.panic(); run({}, 4);
+
+        setChoice(PP::VMODE, 2);
+        juce::MidiBuffer a; a.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        run(a, 4);
+        juce::MidiBuffer b; b.addEvent(juce::MidiMessage::noteOn(1, 67, 0.9f), 0);
+        auto out = run(b, 6);
+        float f = estimateFreq(out.getReadPointer(0), 512, 44100.0);
+        juce::Logger::writeToLog("legato f=" + juce::String(f) + " voices=" + juce::String(vp.activeVoiceCount()));
+        check(vp.activeVoiceCount() == 1 && std::abs(f / (440.0f * std::pow(2.0f, 7.0f / 12.0f)) - 1.0f) < 0.03f,
+              "legato: second key retunes the sounding voice");
+        vp.panic();
+        setChoice(PP::VMODE, 0);
+    }
+
+    // ---- arp: host-locked grid, swing, latch, played velocity ----
+    {
+        struct TestHead : juce::AudioPlayHead
+        {
+            double ppq = 0.0, bpm = 120.0; bool playing = true;
+            juce::Optional<PositionInfo> getPosition() const override
+            {
+                PositionInfo p;
+                p.setBpm(bpm); p.setIsPlaying(playing); p.setPpqPosition(ppq);
+                return p;
+            }
+        };
+        PastelProcessor ap;
+        TestHead head;
+        ap.setPlayHead(&head);
+        ap.prepareToPlay(44100.0, 32);
+        juce::String err;
+        ap.loadSoundFile(sfzFile.getFullPathName(), err);
+        auto setP = [&](const char* id, float plain)
+        {
+            auto* prm = ap.apvts.getParameter(id);
+            prm->setValueNotifyingHost(prm->convertTo0to1(plain));
+        };
+        setP(PP::ARPON, 1.0f); setP(PP::ARPDIV, 6.0f); setP(PP::ARPGATE, 0.5f); // 1/16
+        const double beatSamples = 0.5 * 44100.0;
+        // first sample (from transport 0) at which `note` sounds
+        auto firstOn = [&](int note, juce::MidiBuffer start, int maxSamples)
+        {
+            for (int pos = 0; pos < maxSamples; pos += 32)
+            {
+                head.ppq = pos / beatSamples;
+                juce::AudioBuffer<float> b(2, 32); b.clear();
+                juce::MidiBuffer m = pos == 0 ? start : juce::MidiBuffer();
+                ap.processBlock(b, m);
+                for (int n : ap.getActiveNotes()) if (n == note) return pos;
+            }
+            return -1;
+        };
+        juce::MidiBuffer chord;
+        chord.addEvent(juce::MidiMessage::noteOn(1, 60, 0.9f), 0);
+        chord.addEvent(juce::MidiMessage::noteOn(1, 64, 0.9f), 0);
+        int straight = firstOn(64, chord, 20000);
+        ap.panic();
+        setP(PP::ARPSWING, 1.0f);
+        int swung = firstOn(64, chord, 20000);
+        ap.panic();
+        juce::Logger::writeToLog("arp step 2 straight=" + juce::String(straight) + " swung=" + juce::String(swung));
+        // 1/16 = 5512.5 samples; full swing puts the odd step half a step late
+        check(std::abs(straight - 5512) <= 32 && std::abs(swung - 8268) <= 32, "arp locks to the host grid, swing delays odd steps");
+        setP(PP::ARPSWING, 0.0f);
+
+        // latch: the pattern keeps running after the keys go up
+        setP(PP::ARPLATCH, 1.0f);
+        juce::MidiBuffer tap;
+        tap.addEvent(juce::MidiMessage::noteOn(1, 62, 0.9f), 0);
+        tap.addEvent(juce::MidiMessage::noteOff(1, 62), 16);
+        firstOn(999, tap, 20000);
+        bool stillRunning = firstOn(62, {}, 12000) >= 0;
+        check(stillRunning, "arp latch keeps the pattern after release");
+        setP(PP::ARPLATCH, 0.0f);
+        ap.panic();
+
+        // played velocity: soft key -> quieter arp notes
+        setP(PP::ARPVEL, 1.0f);
+        auto level = [&](float vel)
+        {
+            ap.panic();
+            juce::MidiBuffer k; k.addEvent(juce::MidiMessage::noteOn(1, 60, vel), 0);
+            double ss = 0;
+            for (int pos = 0; pos < 4000; pos += 32)
+            {
+                head.ppq = pos / beatSamples;
+                juce::AudioBuffer<float> b(2, 32); b.clear();
+                juce::MidiBuffer m = pos == 0 ? k : juce::MidiBuffer();
+                ap.processBlock(b, m);
+                ss += bufferRMS(b);
+            }
+            juce::MidiBuffer off; off.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+            juce::AudioBuffer<float> b(2, 32); ap.processBlock(b, off);
+            return ss;
+        };
+        double soft = level(0.25f), hard = level(1.0f);
+        check(soft < 0.6 * hard, "arp uses the played velocity");
+        ap.setPlayHead(nullptr);
+    }
+
+    // ---- plugin presets: sound file + settings round-trip, Init resets ----
+    {
+        auto presetDir = tmp.getChildFile("presets");
+        presetDir.deleteRecursively();
+        PlayerPresets::setUserPresetDirForTest(presetDir);
+        PastelProcessor pp;
+        pp.prepareToPlay(44100.0, 512);
+        juce::String err;
+        pp.loadSoundFile(sfzFile.getFullPathName(), err);
+        auto* cut = pp.apvts.getParameter(PP::FCUT);
+        auto* vm = pp.apvts.getParameter(PP::VMODE);
+        cut->setValueNotifyingHost(0.25f);
+        vm->setValueNotifyingHost(vm->convertTo0to1(2.0f));
+        check(PlayerPresets::writeUserPreset("Test Pad", pp.capturePreset()), "preset written");
+        auto users = PlayerPresets::scanUserPresets();
+        check(users.size() == 1 && users[0].name == "Test Pad", "preset listed");
+        pp.applyPreset({}, "Init");
+        check(std::abs(cut->getValue() - cut->getDefaultValue()) < 1e-6f && pp.getPresetName() == "Init",
+              "Init resets every parameter");
+        auto t = PlayerPresets::readUserPreset(users[0].file);
+        pp.applyPreset(t, users[0].name);
+        check(std::abs(cut->getValue() - 0.25f) < 1e-4f && (int) vm->convertFrom0to1(vm->getValue()) == 2
+              && pp.getPresetName() == "Test Pad" && t.getProperty("soundFile").toString() == sfzFile.getFullPathName(),
+              "preset restores settings + sound file");
+        check(PlayerPresets::deleteUserPreset(users[0].file) && PlayerPresets::scanUserPresets().empty(), "preset deleted");
     }
 
     juce::Logger::writeToLog(failures == 0 ? "ALL TESTS PASSED" : "FAILURES PRESENT");

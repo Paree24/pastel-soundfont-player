@@ -24,14 +24,23 @@ Master defaults to −6 dB headroom.
   preselect, v² velocity law, linear-attack / exp(−9) envelopes
 - **Sound:** UI ADSR (toggle), resonant LP/HP/BP filter 6–48 dB/oct + drive
   (toggle), filter LFO (toggle), chorus / phaser / flanger / distortion /
-  saturation / reverb / delay (each toggled), transparent limiter,
-  mono sum, full dotted/triplet arpeggiator
+  saturation / reverb / delay (each toggled), -0.3 dBFS lookahead limiter
+  (1.5 ms, reported as latency), mono sum
+- **Playing:** pitch bend (sfz `bend_up`/`bend_down`, ±2 st on SF2), sustain
+  pedal, CCs to SF2 too, sample-accurate MIDI, Poly / Mono / Legato with
+  glide, Linear / Cubic / Sinc HQ interpolation
+- **Arpeggiator:** locks to the host grid while the transport runs, dotted /
+  triplet divisions, swing, latch, played velocity
+- **Presets:** save the loaded sound + all settings (Documents/Pastel SFZ
+  Player Presets), Init; drag and drop a file anywhere to load it; knob
+  value popups, double-click resets
 - **Browser:** folder shortcuts (persisted), fast indexed sample search,
   background loading with progress (old sound keeps playing until swap),
   audition keyboard with mapped/switch/active-switch highlights and
   articulation names
-- **Tests:** `PastelHarness` console app, 148 checks incl. real-bank
-  articulation audits (`PASTEL_ARTBANK`, `PASTEL_SCOPE`, `PASTEL_RENDER`)
+- **Tests:** `PastelHarness` console app, 165+ checks incl. real-bank
+  articulation audits (`PASTEL_ARTBANK`, `PASTEL_SCOPE`, `PASTEL_RENDER`);
+  `HostCheck` loads the built VST3 like a DAW
 
 ## Build
 

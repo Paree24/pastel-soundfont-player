@@ -79,7 +79,7 @@ static void styleGroup(juce::GroupComponent& g, juce::Colour accent)
 }
 
 PastelEditor::PastelEditor(PastelProcessor& p)
-    : juce::AudioProcessorEditor(p), proc(p), piano(p)
+    : juce::AudioProcessorEditor(p), proc(p), piano(p), presetBrowser(p, lnf)
 {
     setLookAndFeel(&lnf);
 
@@ -280,8 +280,21 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     addSwitch(PP::FTON, "Filter On");
     addSwitch(PP::LFOON, "LFO On");
 
+    // arp groove + voice card (held by pointer, so the indices above stay put)
+    swingKnob = addKnob(PP::ARPSWING, "Swing");
+    latchSwitch = addSwitch(PP::ARPLATCH, "Latch: keep playing after the keys go up");
+    velSwitch = addSwitch(PP::ARPVEL, "Played velocity (off: fixed)");
+    styleGroup(voiceGroup, PastelColors::teal);
+    addAndMakeVisible(voiceGroup);
+    voiceChoice = addChoice(PP::VMODE, "Mode", { "Poly", "Mono", "Legato" });
+    glideKnob = addKnob(PP::GLIDE, "Glide");
+    interpChoice = addChoice(PP::INTERP, "Quality", { "Linear", "Cubic", "Sinc HQ" });
+    voiceChoice->c->setTooltip("Poly, Mono (retrigger) or Legato (overlapping keys slide)");
+    glideKnob->s->setTooltip("Glide time between notes in Mono / Legato");
+    interpChoice->c->setTooltip("Sample interpolation: Sinc HQ is cleanest when pitching up, at more CPU");
+
     // master switch captions (switches themselves stay textless)
-    for (auto* cap : { &limCap, &monoCap, &syncCap })
+    for (auto* cap : { &limCap, &monoCap, &syncCap, &latchCap, &velCap })
     {
         cap->setJustificationType(juce::Justification::centred);
         cap->setFont(lnf.uiFont(9.5f));
@@ -291,6 +304,13 @@ PastelEditor::PastelEditor(PastelProcessor& p)
 
     // piano strip (full-bleed, highlights mapped + keyswitch + active notes)
     addAndMakeVisible(piano);
+
+    // preset browser overlay (hidden until PRESETS)
+    presetsBtn.setTooltip("Save and recall the loaded sound with all its settings");
+    presetsBtn.onClick = [&] { presetBrowser.setVisible(true); presetBrowser.toFront(true); };
+    addAndMakeVisible(presetsBtn);
+    presetBrowser.onClose = [&] { presetBrowser.setVisible(false); };
+    addChildComponent(presetBrowser);
 
     proc.addChangeListener(this);
     proc.library.addChangeListener(this);
@@ -327,6 +347,11 @@ PastelEditor::Knob* PastelEditor::addKnob(const juce::String& pid, const juce::S
     k->l->setColour(juce::Label::textColourId, PastelColors::text);
     addAndMakeVisible(k->l.get());
     k->a = std::make_unique<Attach::SliderAttachment>(proc.apvts, pid, *k->s);
+    // value popup while dragging/hovering, double-click resets to default
+    k->s->setPopupDisplayEnabled(true, true, this);
+    if (auto* prm = proc.apvts.getParameter(pid))
+        k->s->setDoubleClickReturnValue(true, prm->convertFrom0to1(prm->getDefaultValue()));
+    k->s->setTooltip(title + "  (double-click: reset)");
     Knob* ptr = k.get();
     knobs.push_back(std::move(k));
     return ptr;
@@ -378,6 +403,17 @@ void PastelEditor::paint(juce::Graphics& g)
     g.setColour(PastelColors::panelEdge);
     g.drawRoundedRectangle(10.5f, 8.5f, getWidth() - 21, 57, 6.0f, 1.0f);
     paintMeter(g, meterArea);
+}
+
+void PastelEditor::paintOverChildren(juce::Graphics& g)
+{
+    if (!dropHover) return;
+    g.setColour(PastelColors::teal.withAlpha(0.12f));
+    g.fillRect(getLocalBounds());
+    g.setColour(PastelColors::teal);
+    g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(6.0f), 8.0f, 2.0f);
+    g.setFont(lnf.titleFont(20.0f));
+    g.drawText("DROP TO LOAD", getLocalBounds(), juce::Justification::centred, false);
 }
 
 void PastelEditor::paintMeter(juce::Graphics& g, juce::Rectangle<int> area)
@@ -436,14 +472,15 @@ void PastelEditor::resized()
     loadBtn.setBounds(btnX, btnY, 76, btnH); btnX += 76 + 6;
     prevBtn.setBounds(btnX, btnY, 30, btnH); btnX += 30 + 6;
     nextBtn.setBounds(btnX, btnY, 30, btnH); btnX += 30 + 6;
-    panicBtn.setBounds(btnX, btnY, 70, btnH);
+    panicBtn.setBounds(btnX, btnY, 70, btnH); btnX += 70 + 6;
+    presetsBtn.setBounds(btnX, btnY, 84, btnH);
 
     const int meterW = 150;
     meterArea = { W - M - pad - meterW, 15, meterW, 44 };
     int rightX = meterArea.getX() - 20;
     // program box shrinks so it never runs into the transport buttons
     const int bankW = 64;
-    const int presetW = juce::jlimit(120, 220, rightX - (panicBtn.getRight() + 20) - bankW - 10);
+    const int presetW = juce::jlimit(120, 220, rightX - (presetsBtn.getRight() + 20) - bankW - 10);
     presetBox.setBounds(rightX - presetW, 30, presetW, 24);
     presetBoxLabel.setBounds(rightX - presetW, 15, presetW, 13);
     rightX -= presetW + 10;
@@ -614,9 +651,12 @@ void PastelEditor::resized()
         monoCap.setBounds(cxm + 4 - 6, swY + 21, 58, 12);
     }
 
-    // ---------- arp strip ----------
-    const juce::Rectangle<int> arpR(M, top + mainH + gap, W - 2 * M, arpH);
+    // ---------- arp strip + voice card ----------
+    const int voiceW = 330;
+    const juce::Rectangle<int> arpR(M, top + mainH + gap, W - 2 * M - voiceW - gap, arpH);
+    const juce::Rectangle<int> voiceR(arpR.getRight() + gap, arpR.getY(), voiceW, arpH);
     arpGroup.setBounds(arpR);
+    voiceGroup.setBounds(voiceR);
     placeHeaderSwitch(*switches[9]->b, arpR);
     {
         int cy = arpR.getY() + barH + 4;  // content top
@@ -631,9 +671,53 @@ void PastelEditor::resized()
         int kx = arpR.getX() + pad + 132 + 100 + 44;
         placeKnob(*knobs[31], kx, cy + 31 - kh / 2 - 6, kh, 60);
         placeKnob(*knobs[32], kx + 64, cy + 31 - kh / 2 - 6, kh, 60);
+        placeKnob(*swingKnob, kx + 128, cy + 31 - kh / 2 - 6, kh, 60);
+        // latch / vel toggles + captions, like the master card's
+        int sx = kx + 128 + 54;
+        latchSwitch->b->setBounds(sx, cy + 21, 46, 20);
+        latchCap.setBounds(sx - 6, cy + 42, 58, 12);
+        velSwitch->b->setBounds(sx + 58, cy + 21, 46, 20);
+        velCap.setBounds(sx + 58 - 6, cy + 42, 58, 12);
+    }
+    {
+        int cy = voiceR.getY() + barH + 4;
+        int x = voiceR.getX() + pad;
+        voiceChoice->l->setBounds(x, cy + 4, 104, 13);
+        voiceChoice->c->setBounds(x, cy + 19, 104, 24);
+        const int kh = 40;
+        placeKnob(*glideKnob, x + 104 + 40, cy + 31 - kh / 2 - 6, kh, 60);
+        int ix = x + 104 + 80;
+        interpChoice->l->setBounds(ix, cy + 4, voiceR.getRight() - pad - ix, 13);
+        interpChoice->c->setBounds(ix, cy + 19, voiceR.getRight() - pad - ix, 24);
     }
 
     piano.setBounds(M, arpR.getBottom() + gap, W - 2 * M, kbH);
+    presetBrowser.setBounds(getLocalBounds());
+}
+
+bool PastelEditor::isInterestedInFileDrag(const juce::StringArray& files)
+{
+    for (auto& f : files)
+    {
+        juce::File file(f);
+        if (FileLibrary::isSoundfontFile(file) || SamplerEngine::isAudioFile(file)) return true;
+    }
+    return false;
+}
+
+void PastelEditor::filesDropped(const juce::StringArray& files, int, int)
+{
+    dropHover = false;
+    repaint();
+    for (auto& f : files)
+    {
+        juce::File file(f);
+        if (FileLibrary::isSoundfontFile(file) || SamplerEngine::isAudioFile(file))
+        {
+            proc.requestLoad(file.getFullPathName()); // background; progress via timer
+            return;
+        }
+    }
 }
 
 void PastelEditor::refreshShortcuts()

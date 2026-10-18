@@ -73,9 +73,17 @@ namespace PP
     // Arp
     static constexpr const char* ARPON = "arpon";
     static constexpr const char* ARPMODE = "arpmode"; // 0 up 1 down 2 updown 3 random
-    static constexpr const char* ARPDIV = "arpdiv";   // 0:1/4 1:1/8 2:1/16 3:1/8T 4:1/16T 5:1/32
+    static constexpr const char* ARPDIV = "arpdiv";   // 0:1/4 1:1/4T 2:1/4D 3:1/8 4:1/8T 5:1/8D
+                                                      // 6:1/16 7:1/16T 8:1/16D 9:1/32 10:1/32T
     static constexpr const char* ARPOCT = "arpoct";   // 1..4
     static constexpr const char* ARPGATE = "arpgate"; // 0.1..1
+    static constexpr const char* ARPSWING = "arpswing"; // 0 straight .. 1 (odd steps late by half a step)
+    static constexpr const char* ARPLATCH = "arplatch"; // keep the pattern after the keys go up
+    static constexpr const char* ARPVEL = "arpvel";     // on: played velocity, off: fixed 0.9
+    // Voice
+    static constexpr const char* VMODE = "vmode";   // 0 poly 1 mono 2 legato
+    static constexpr const char* GLIDE = "glide";   // portamento seconds (mono/legato)
+    static constexpr const char* INTERP = "interp"; // 0 linear 1 cubic 2 sinc HQ
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

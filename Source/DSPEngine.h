@@ -1,4 +1,5 @@
 #pragma once
+#include "Limiter.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include "VoiceFilter.h"
@@ -134,6 +135,9 @@ public:
     void process(juce::AudioBuffer<float>& buffer, const DspParams& p);
     float getLevelL() const { return levelL; }
     float getLevelR() const { return levelR; }
+    // master limiter lookahead in samples (constant, also while bypassed)
+    int getLatencySamples() const { return limiter.latency(); }
+    float getLimiterReductionDb() const { return limiter.reductionDb(); }
 
 private:
     float lfoSample(int wave, double phase) const;
@@ -155,6 +159,7 @@ private:
     ModVerb reverb;
     SatFX sat;
     DelayFX delay;
+    PeakLimiter limiter;
 
     std::vector<float> flDelayL, flDelayR;
     int flWrite = 0;

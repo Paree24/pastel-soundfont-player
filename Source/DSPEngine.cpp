@@ -278,6 +278,7 @@ void DSPEngine::prepare(double sampleRate, int maxBlockSize)
     reverb.prepare(sr);
     sat.prepare(sr);
     delay.prepare(sr);
+    limiter.prepare(sr);
 
     int flMax = (int)(sr * 0.02) + 8;
     flDelayL.assign((size_t) flMax, 0.0f);
@@ -294,6 +295,7 @@ void DSPEngine::reset()
         for (int s = 0; s < 4; ++s) svf[s][ch].reset();
     }
     chorus.clear(); phaser.clear(); reverb.clear(); sat.reset(); delay.clear();
+    limiter.reset();
     std::fill(flDelayL.begin(), flDelayL.end(), 0.0f);
     std::fill(flDelayR.begin(), flDelayR.end(), 0.0f);
     distToneStateL = distToneStateR = 0.0f;
@@ -316,16 +318,7 @@ float DSPEngine::lfoSample(int wave, double phase) const
 }
 
 static float softClip(float x) { return std::tanh(x); }
-// Transparent ceiling: dry below 0.9, asymptotically limited to 1.0 above.
-static float softLimit(float x)
-{
-    float a = std::fabs(x);
-    if (a <= 0.9f) return x;
-    float s = (x < 0.0f) ? -1.0f : 1.0f;
-    float over = (a - 0.9f) / 0.9f;
-    return s * (0.9f + 0.1f * over / (1.0f + over));
-}
-
+static constexpr float limiterCeiling = 0.9661f; // -0.3 dBFS
 void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
 {
     const int N = buffer.getNumSamples();
@@ -488,19 +481,22 @@ void DSPEngine::process(juce::AudioBuffer<float>& buffer, const DspParams& p)
         reverb.process(L, R, N, p.rvSize, p.rvDamp, p.rvMix);
 
     // ---------- mono sum + master + limiter + meters ----------
-    // Limiter is transparent below -0.9 dBFS and only rounds overs above it
-    // (asymptotic to 1.0): normal levels pass bit-dry, hot stacks can't clip.
-    float peakL = 0.0f, peakR = 0.0f;
+    // Lookahead limiter (shared PeakLimiter): peaks above -0.3 dBFS are
+    // turned down, not clipped; below the ceiling the signal passes dry.
+    // Off = the same lookahead delay with no gain change, so timing holds.
     for (int i = 0; i < N; ++i)
     {
         float xL = L[i], xR = R[i];
         if (p.mono) { float mid = 0.5f * (xL + xR); xL = mid; xR = mid; }
-        xL *= p.volume; xR *= p.volume;
-        if (p.limiter) { xL = softLimit(xL); xR = softLimit(xR); }
-        else { xL = juce::jlimit(-1.2f, 1.2f, xL); xR = juce::jlimit(-1.2f, 1.2f, xR); }
-        L[i] = xL; R[i] = xR;
-        peakL = juce::jmax(peakL, std::abs(xL));
-        peakR = juce::jmax(peakR, std::abs(xR));
+        L[i] = xL * p.volume; R[i] = xR * p.volume;
+    }
+    limiter.process(L, R, N, limiterCeiling, p.limiter);
+    float peakL = 0.0f, peakR = 0.0f;
+    for (int i = 0; i < N; ++i)
+    {
+        if (!p.limiter) { L[i] = juce::jlimit(-1.2f, 1.2f, L[i]); R[i] = juce::jlimit(-1.2f, 1.2f, R[i]); }
+        peakL = juce::jmax(peakL, std::abs(L[i]));
+        peakR = juce::jmax(peakR, std::abs(R[i]));
     }
     const float decay = 0.9995f;
     levelL = juce::jmax(peakL, levelL * decay);

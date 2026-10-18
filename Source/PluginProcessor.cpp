@@ -1,10 +1,11 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Parameters.h"
+#include "PlayerPresets.h"
+#include <limits>
 
 PastelProcessor::PastelProcessor()
     : juce::AudioProcessor(BusesProperties()
-          .withInput("Input", juce::AudioChannelSet::stereo(), true)
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "PastelPlayer", createParameterLayout())
 {
@@ -27,6 +28,7 @@ void PastelProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     sampler.setSampleRate(sampleRate);
     dsp.prepare(sampleRate, samplesPerBlock);
     monoScratch.setSize(2, juce::jmax(1, samplesPerBlock));
+    setLatencySamples(dsp.getLatencySamples()); // limiter lookahead (held while bypassed)
     arpReleaseAll();
     arpReset();
     // NOTE: no auto-load here on purpose. A new instance starts empty;
@@ -85,10 +87,7 @@ void PastelProcessor::finishLoad(int gen, std::shared_ptr<SamplerEngine> loader,
     if (ok && loader)
     {
         sampler.swapWith(*loader);
-        {
-            juce::ScopedLock sl(activeLock);
-            activeNotes.clear();
-        }
+        clearActiveNotes();
         sampler.setSf2Preset((int) *apvts.getRawParameterValue(PP::BANK),
                              (int) *apvts.getRawParameterValue(PP::PRESET));
         lastBank = lastPreset = -1;
@@ -132,10 +131,7 @@ bool PastelProcessor::loadSoundFile(const juce::String& path, juce::String& erro
     bool ok = sampler.loadFile(path, errorOut);
     if (ok)
     {
-        {
-            juce::ScopedLock sl(activeLock);
-            activeNotes.clear();
-        }
+        clearActiveNotes();
         sampler.setSf2Preset((int) *apvts.getRawParameterValue(PP::BANK),
                              (int) *apvts.getRawParameterValue(PP::PRESET));
         lastBank = lastPreset = -1; // force refresh
@@ -156,8 +152,12 @@ void PastelProcessor::panic()
 {
     sampler.panic();
     arpReset();
-    juce::ScopedLock sl(activeLock);
-    activeNotes.clear();
+    clearActiveNotes();
+}
+
+void PastelProcessor::clearActiveNotes()
+{
+    for (auto& n : noteSounding) n.store(false, std::memory_order_relaxed);
 }
 
 void PastelProcessor::auditionNoteOn(int note, float vel)
@@ -172,26 +172,23 @@ void PastelProcessor::auditionNoteOff(int note)
 
 void PastelProcessor::engineNoteOn(int note, float vel)
 {
-    {
-        juce::ScopedLock sl(activeLock);
-        activeNotes.insert(note);
-    }
+    if (note >= 0 && note < 128) noteSounding[note].store(true, std::memory_order_relaxed);
     sampler.noteOn(note, vel);
 }
 
 void PastelProcessor::engineNoteOff(int note)
 {
-    {
-        juce::ScopedLock sl(activeLock);
-        activeNotes.erase(note);
-    }
+    if (note >= 0 && note < 128) noteSounding[note].store(false, std::memory_order_relaxed);
     sampler.noteOff(note);
 }
 
+// UI poll: reads the per-key flags, never a lock the audio thread takes
 std::vector<int> PastelProcessor::getActiveNotes() const
 {
-    juce::ScopedLock sl(activeLock);
-    return { activeNotes.begin(), activeNotes.end() };
+    std::vector<int> v;
+    for (int n = 0; n < 128; ++n)
+        if (noteSounding[n].load(std::memory_order_relaxed)) v.push_back(n);
+    return v;
 }
 
 int PastelProcessor::getLastKeyswitch() const { return sampler.getLastKeyswitch(); }
@@ -229,6 +226,46 @@ int PastelProcessor::getVoiceSwReq(int voiceIdx) const
 const juce::String PastelProcessor::getProgramName(int)
 {
     return currentProgramName();
+}
+
+juce::ValueTree PastelProcessor::capturePreset()
+{
+    juce::ValueTree t(PlayerPresets::kRootType);
+    t.setProperty("soundFile", sampler.currentPath(), nullptr);
+    for (auto* prm : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(prm))
+        {
+            juce::ValueTree v("PARAM");
+            v.setProperty("id", rp->getParameterID(), nullptr);
+            v.setProperty("value", rp->convertFrom0to1(rp->getValue()), nullptr);
+            t.appendChild(v, nullptr);
+        }
+    return t;
+}
+
+// every parameter not in the preset (or all, for Init) goes back to its
+// default; each change is a host gesture so automation lanes record it
+void PastelProcessor::applyPreset(const juce::ValueTree& preset, const juce::String& name)
+{
+    for (auto* prm : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(prm))
+        {
+            float norm = rp->getDefaultValue();
+            if (preset.isValid())
+            {
+                auto v = preset.getChildWithProperty("id", rp->getParameterID());
+                if (v.isValid()) norm = rp->convertTo0to1((float) v.getProperty("value"));
+            }
+            if (std::abs(norm - rp->getValue()) < 1.0e-7f) continue;
+            rp->beginChangeGesture();
+            rp->setValueNotifyingHost(norm);
+            rp->endChangeGesture();
+        }
+    setPresetName(name);
+    auto f = preset.isValid() ? preset.getProperty("soundFile", "").toString() : juce::String();
+    if (f.isNotEmpty() && f != sampler.currentPath() && juce::File(f).existsAsFile())
+        requestLoad(f);
+    sendChangeMessage();
 }
 
 void PastelProcessor::getStateInformation(juce::MemoryBlock& destData)
@@ -280,48 +317,54 @@ DspParams PastelProcessor::collectParams()
     p.dlMix = get(PP::DLMIX); p.dlSync = get(PP::DLSYNC) > 0.5f; p.dlDiv = getInt(PP::DLDIV);
     p.volume = get(PP::VOLUME); p.limiter = get(PP::LIMIT) > 0.5f;
     p.mono = get(PP::MONO) > 0.5f;
-    if (auto* ph = getPlayHead())
-        if (auto pos = ph->getPosition())
-            if (pos->getBpm()) p.bpm = *pos->getBpm();
-    arpLastBpm = p.bpm;
     return p;
 }
 
 void PastelProcessor::arpReleaseAll()
 {
-    for (auto& po : arpPendingOffs) engineNoteOff(po.first);
+    for (int i = 0; i < arpOffCount; ++i) engineNoteOff(arpOffs[i].note);
     if (arpLastNote >= 0) engineNoteOff(arpLastNote);
 }
 
 void PastelProcessor::arpReset()
 {
-    arpHeld.clear();
-    arpPendingOffs.clear();
+    arpHeldCount = 0;
+    arpOffCount = 0;
+    std::fill(std::begin(arpKeyDown), std::end(arpKeyDown), false);
     arpSamplesUntilNext = 0.0;
-    arpStep = 0; arpDir = 1; arpLastNote = -1;
+    arpGridIdx = 0;
+    arpLastGridIdx = std::numeric_limits<long long>::min();
+    arpStep = 0; arpLastNote = -1;
 }
 
-int PastelProcessor::arpNextNote()
+// next pattern note + its velocity (fixed storage: no audio-thread allocation)
+bool PastelProcessor::arpNextNote(int& noteOut, float& velOut)
 {
-    if (arpHeld.empty()) return -1;
-    std::vector<int> notes = arpHeld;
-    std::sort(notes.begin(), notes.end());
+    if (arpHeldCount <= 0) return false;
+    int sorted[arpMaxHeld]; float vels[arpMaxHeld];
+    for (int i = 0; i < arpHeldCount; ++i) { sorted[i] = arpHeld[i]; vels[i] = arpHeldVel[i]; }
+    for (int i = 1; i < arpHeldCount; ++i) // insertion sort, pitch order
+        for (int j = i; j > 0 && sorted[j - 1] > sorted[j]; --j)
+        {
+            std::swap(sorted[j - 1], sorted[j]);
+            std::swap(vels[j - 1], vels[j]);
+        }
     int mode = (int) *apvts.getRawParameterValue(PP::ARPMODE);
     int octs = juce::jlimit(1, 4, (int) *apvts.getRawParameterValue(PP::ARPOCT));
-    std::vector<int> seq;
+    int seq[arpMaxHeld * 4]; float seqVel[arpMaxHeld * 4];
+    int n = 0;
     for (int o = 0; o < octs; ++o)
-        for (int n : notes)
+        for (int i = 0; i < arpHeldCount; ++i)
         {
-            int v = n + o * 12;
-            if (v <= 127) seq.push_back(v);
+            int v = sorted[i] + o * 12;
+            if (v <= 127) { seq[n] = v; seqVel[n] = vels[i]; ++n; }
         }
-    if (seq.empty()) return -1;
+    if (n == 0) return false;
     int idx = 0;
-    if (mode == 0) idx = arpStep % (int) seq.size();
-    else if (mode == 1) idx = (int) seq.size() - 1 - (arpStep % (int) seq.size());
+    if (mode == 0) idx = arpStep % n;
+    else if (mode == 1) idx = n - 1 - (arpStep % n);
     else if (mode == 2)
     {
-        int n = (int) seq.size();
         if (n == 1) idx = 0;
         else
         {
@@ -330,8 +373,10 @@ int PastelProcessor::arpNextNote()
             idx = s < n ? s : cyc - s;
         }
     }
-    else idx = juce::Random::getSystemRandom().nextInt((int) seq.size());
-    return seq[(size_t) idx];
+    else idx = arpRng.nextInt(n);
+    noteOut = seq[idx];
+    velOut = seqVel[idx];
+    return true;
 }
 
 static double arpBeats(int div)
@@ -352,107 +397,204 @@ static double arpBeats(int div)
     }
 }
 
-void PastelProcessor::handleMidi(juce::MidiBuffer& midi, int numSamples, double bpm)
+// beat position of arp step k: odd steps sit late by swing * half a step
+static double arpStepBeat(long long k, double stepBeats, double swing)
+{
+    return ((double) k + ((k & 1) ? 0.5 * swing : 0.0)) * stepBeats;
+}
+
+void PastelProcessor::arpKeyOn(int note, float vel)
+{
+    bool latch = apvts.getRawParameterValue(PP::ARPLATCH)->load() > 0.5f;
+    bool anyDown = false;
+    for (bool d : arpKeyDown) anyDown = anyDown || d;
+    if (latch && !anyDown) arpHeldCount = 0; // latched: a fresh press starts a new chord
+    arpKeyDown[note] = true;
+    for (int i = 0; i < arpHeldCount; ++i)
+        if (arpHeld[i] == note) { arpHeldVel[i] = vel; return; }
+    if (arpHeldCount < arpMaxHeld)
+    {
+        arpHeld[arpHeldCount] = note;
+        arpHeldVel[arpHeldCount] = vel;
+        ++arpHeldCount;
+    }
+}
+
+void PastelProcessor::arpKeyOff(int note)
+{
+    arpKeyDown[note] = false;
+    if (apvts.getRawParameterValue(PP::ARPLATCH)->load() > 0.5f) return; // pattern keeps going
+    int k = 0;
+    for (int i = 0; i < arpHeldCount; ++i)
+        if (arpHeld[i] != note) { arpHeld[k] = arpHeld[i]; arpHeldVel[k] = arpHeldVel[i]; ++k; }
+    arpHeldCount = k;
+    // the ringing arp voice keeps going until its gate ends
+}
+
+void PastelProcessor::handleEvent(const juce::MidiMessage& msg, bool arpOn)
+{
+    if (msg.isNoteOn())
+    {
+        int n = msg.getNoteNumber();
+        if (arpOn) arpKeyOn(n, msg.getFloatVelocity());
+        else engineNoteOn(n, msg.getFloatVelocity());
+    }
+    else if (msg.isNoteOff())
+    {
+        int n = msg.getNoteNumber();
+        if (arpOn) arpKeyOff(n);
+        else engineNoteOff(n);
+    }
+    else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+    {
+        sampler.allNotesOff();
+        arpHeldCount = 0;
+        std::fill(std::begin(arpKeyDown), std::end(arpKeyDown), false);
+        clearActiveNotes();
+    }
+    else if (msg.isPitchWheel())
+    {
+        int v = msg.getPitchWheelValue() - 8192; // -8192..8191 -> -1..1
+        sampler.setPitchBend(v >= 0 ? v / 8191.0f : v / 8192.0f);
+    }
+    else if (msg.isController())
+    {
+        int cc = msg.getControllerNumber(), val = msg.getControllerValue();
+        sampler.setCC(cc, val); // state for sfz conditions (on_locc/hicc...) + tsf
+        if (cc == 64) sampler.setSustain(val >= 64);
+    }
+}
+
+void PastelProcessor::renderSampler(juce::AudioBuffer<float>& target, int start, int num)
+{
+    if (num > 0)
+        sampler.renderAdding(target.getWritePointer(0) + start, target.getWritePointer(1) + start, num);
+}
+
+// Sample-accurate MIDI: the block is rendered in segments that end on each
+// incoming event, arp step and arp gate-off, so every note lands on its sample.
+void PastelProcessor::renderWithMidi(juce::AudioBuffer<float>& target, juce::MidiBuffer& midi,
+                                     int numSamples, const HostTime& ht)
 {
     bool arpOn = apvts.getRawParameterValue(PP::ARPON)->load() > 0.5f;
-    double sr = getSampleRate();
-
-    // collect incoming note events
-    struct Ev { int sample; int note; float vel; bool on; };
-    std::vector<Ev> evs;
-    for (auto m : midi)
+    if (!arpOn && (arpHeldCount > 0 || arpLastNote >= 0 || arpOffCount > 0))
     {
-        auto msg = m.getMessage();
-        if (msg.isNoteOn()) evs.push_back({ m.samplePosition, msg.getNoteNumber(), msg.getFloatVelocity(), true });
-        else if (msg.isNoteOff()) evs.push_back({ m.samplePosition, msg.getNoteNumber(), 0.0f, false });
-        else if (msg.isAllNotesOff() || msg.isAllSoundOff())
-        {
-            sampler.allNotesOff();
-            arpHeld.clear();
-            juce::ScopedLock sl(activeLock);
-            activeNotes.clear();
-        }
-        else if (msg.isController()) sampler.setCC(msg.getControllerNumber(), msg.getControllerValue());
+        arpReleaseAll();
+        arpReset();
+    }
+    if (arpOn && !arpWasOn) arpReset();
+    arpWasOn = arpOn;
+
+    const double sr = getSampleRate() > 0 ? getSampleRate() : 44100.0;
+    const double bpm = ht.bpm > 20 ? ht.bpm : 120.0;
+    const double spb = 60.0 / bpm * sr; // samples per beat
+    const double stepBeats = arpBeats((int) apvts.getRawParameterValue(PP::ARPDIV)->load());
+    const double swing = juce::jlimit(0.0f, 1.0f, apvts.getRawParameterValue(PP::ARPSWING)->load());
+    const float gate = juce::jlimit(0.1f, 1.0f, apvts.getRawParameterValue(PP::ARPGATE)->load());
+    const bool playedVel = apvts.getRawParameterValue(PP::ARPVEL)->load() > 0.5f;
+    const bool grid = arpOn && ht.playing && ht.hasPpq;
+
+    if (arpOn && !apvts.getRawParameterValue(PP::ARPLATCH)->load())
+    {
+        // latch released while no key is down: drop the latched chord
+        bool anyDown = false;
+        for (bool d : arpKeyDown) anyDown = anyDown || d;
+        if (!anyDown) arpHeldCount = 0;
     }
 
-    if (!arpOn)
+    if (grid)
     {
-        if (!arpHeld.empty() || arpLastNote >= 0 || !arpPendingOffs.empty())
-        {
-            arpReleaseAll();
-            arpReset();
-        }
-        for (auto& e : evs)
-        {
-            if (e.on) engineNoteOn(e.note, e.vel);
-            else engineNoteOff(e.note);
-        }
-        return;
+        // host-locked: the next step is the first grid line at/after the block
+        // start that has not fired yet (a transport jump back re-arms the grid)
+        if (ht.ppq < arpPrevPpq - 1.0e-6) arpLastGridIdx = std::numeric_limits<long long>::min();
+        long long k = (long long) std::floor(ht.ppq / stepBeats) - 1;
+        while (arpStepBeat(k, stepBeats, swing) < ht.ppq - 1.0e-9 || k <= arpLastGridIdx) ++k;
+        arpGridIdx = k;
+        arpSamplesUntilNext = (arpStepBeat(k, stepBeats, swing) - ht.ppq) * spb;
+        arpPrevPpq = ht.ppq;
     }
+    else arpPrevPpq = -1.0e9;
 
-    // arp mode: update held set, generate pattern
-    for (auto& e : evs)
+    auto it = midi.cbegin();
+    const auto end = midi.cend();
+    int pos = 0;
+    for (;;)
     {
-        if (e.on)
+        while (it != end && (*it).samplePosition <= pos)
         {
-            if (std::find(arpHeld.begin(), arpHeld.end(), e.note) == arpHeld.end())
-                arpHeld.push_back(e.note);
+            handleEvent((*it).getMessage(), arpOn);
+            ++it;
         }
-        else
+        if (arpOn)
         {
-            arpHeld.erase(std::remove(arpHeld.begin(), arpHeld.end(), e.note), arpHeld.end());
-            // stop ringing arp voice if it matches released key class? keep ringing till gate ends
+            for (int i = 0; i < arpOffCount;)
+            {
+                if (arpOffs[i].samplesLeft > 0) { ++i; continue; }
+                engineNoteOff(arpOffs[i].note);
+                if (arpOffs[i].note == arpLastNote) arpLastNote = -1;
+                arpOffs[i] = arpOffs[--arpOffCount];
+            }
+            if (arpHeldCount == 0) arpStep = 0;
+            while (arpSamplesUntilNext <= 0.0)
+            {
+                if (arpHeldCount == 0 && !grid) { arpSamplesUntilNext = 0.0; arpGridIdx = 0; break; }
+                int n = -1; float v = 0.9f;
+                if (arpNextNote(n, v))
+                {
+                    if (arpLastNote >= 0) engineNoteOff(arpLastNote);
+                    for (int i = 0; i < arpOffCount;)
+                        if (arpOffs[i].note == n || arpOffs[i].note == arpLastNote) arpOffs[i] = arpOffs[--arpOffCount];
+                        else ++i;
+                    engineNoteOn(n, playedVel ? v : 0.9f);
+                    arpLastNote = n;
+                    double stepLen = (arpStepBeat(arpGridIdx + 1, stepBeats, swing)
+                                      - arpStepBeat(arpGridIdx, stepBeats, swing)) * spb;
+                    if (arpOffCount < arpMaxOffs)
+                        arpOffs[arpOffCount++] = { n, juce::jmax(1, (int) (stepLen * gate * 0.98)) };
+                    arpStep++;
+                }
+                if (grid) arpLastGridIdx = arpGridIdx;
+                arpSamplesUntilNext += (arpStepBeat(arpGridIdx + 1, stepBeats, swing)
+                                        - arpStepBeat(arpGridIdx, stepBeats, swing)) * spb;
+                ++arpGridIdx;
+            }
         }
-    }
+        if (pos >= numSamples) break;
 
-    int div = (int) apvts.getRawParameterValue(PP::ARPDIV)->load();
-    float gate = apvts.getRawParameterValue(PP::ARPGATE)->load();
-    double stepSamples = arpBeats(div) * 60.0 / (bpm > 20 ? bpm : 120.0) * sr;
-
-    // process pending note-offs
-    for (auto it = arpPendingOffs.begin(); it != arpPendingOffs.end();)
-    {
-        it->second -= numSamples;
-        if (it->second <= 0) { engineNoteOff(it->first); it = arpPendingOffs.erase(it); }
-        else ++it;
-    }
-
-    if (arpHeld.empty())
-    {
-        arpSamplesUntilNext = 0.0;
-        arpStep = 0;
-        return;
-    }
-
-    arpSamplesUntilNext -= numSamples;
-    while (arpSamplesUntilNext <= 0.0)
-    {
-        int n = arpNextNote();
-        if (n >= 0)
+        int next = numSamples;
+        if (it != end) next = juce::jmin(next, juce::jmax(pos + 1, (*it).samplePosition));
+        if (arpOn)
         {
-            if (arpLastNote >= 0) engineNoteOff(arpLastNote);
-            arpPendingOffs.erase(std::remove_if(arpPendingOffs.begin(), arpPendingOffs.end(),
-                [n](const std::pair<int,int>& po) { return po.first == n; }), arpPendingOffs.end());
-            engineNoteOn(n, 0.9f);
-            arpLastNote = n;
-            int lenSamples = juce::jmax(1, (int)(stepSamples * juce::jlimit(0.1f, 1.0f, gate) * 0.98));
-            arpPendingOffs.push_back({ n, lenSamples });
+            if (arpHeldCount > 0 || grid)
+                next = juce::jmin(next, pos + juce::jmax(1, (int) std::ceil(arpSamplesUntilNext)));
+            for (int i = 0; i < arpOffCount; ++i) next = juce::jmin(next, pos + arpOffs[i].samplesLeft);
         }
-        arpStep++;
-        arpSamplesUntilNext += stepSamples;
-        if (stepSamples <= 0) break;
+        const int seg = next - pos;
+        renderSampler(target, pos, seg);
+        if (arpOn)
+        {
+            if (arpHeldCount > 0 || grid) arpSamplesUntilNext -= seg;
+            for (int i = 0; i < arpOffCount; ++i) arpOffs[i].samplesLeft -= seg;
+        }
+        pos = next;
     }
+    // events stamped past the block end (non-conforming hosts): apply now
+    for (; it != end; ++it) handleEvent((*it).getMessage(), arpOn);
 }
 
 void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear(i, 0, buffer.getNumSamples());
-
     DspParams p = collectParams();
+    HostTime ht;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+        {
+            if (pos->getBpm()) ht.bpm = *pos->getBpm();
+            ht.playing = pos->getIsPlaying();
+            if (pos->getPpqPosition()) { ht.ppq = *pos->getPpqPosition(); ht.hasPpq = true; }
+        }
+    p.bpm = ht.bpm;
 
     // envelope (cheap change check to avoid lock churn)
     float a = apvts.getRawParameterValue(PP::ATK)->load();
@@ -466,6 +608,15 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     }
     bool adsrOn = apvts.getRawParameterValue(PP::ADSRON)->load() > 0.5f;
     if (adsrOn != lastAdsrOn) { sampler.setAdsrEnabled(adsrOn); lastAdsrOn = adsrOn; }
+    int vmode = (int) apvts.getRawParameterValue(PP::VMODE)->load();
+    float glide = apvts.getRawParameterValue(PP::GLIDE)->load();
+    if (vmode != lastVoiceMode || glide != lastGlide)
+    {
+        sampler.setVoiceMode(vmode, glide);
+        lastVoiceMode = vmode; lastGlide = glide;
+    }
+    int interp = (int) apvts.getRawParameterValue(PP::INTERP)->load();
+    if (interp != lastInterp) { sampler.setInterpolation(interp); lastInterp = interp; }
     int bank = (int) apvts.getRawParameterValue(PP::BANK)->load();
     int preset = (int) apvts.getRawParameterValue(PP::PRESET)->load();
     if ((bank != lastBank || preset != lastPreset) && sampler.isLoaded() && sampler.isSf2())
@@ -473,9 +624,6 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         sampler.setSf2Preset(bank, preset);
         lastBank = bank; lastPreset = preset;
     }
-
-    handleMidi(midi, buffer.getNumSamples(), p.bpm);
-    midi.clear();
 
     buffer.clear();
     const int numSamples = buffer.getNumSamples();
@@ -489,7 +637,7 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             monoScratch.setSize(2, numSamples, false, false, true);
         juce::AudioBuffer<float> st(monoScratch.getArrayOfWritePointers(), 2, numSamples);
         st.clear();
-        sampler.renderAdding(st.getWritePointer(0), st.getWritePointer(1), numSamples);
+        renderWithMidi(st, midi, numSamples, ht);
         dsp.process(st, p);
         auto* dst = buffer.getWritePointer(0);
         auto* tl = st.getReadPointer(0);
@@ -498,9 +646,10 @@ void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     }
     else if (nCh >= 2)
     {
-        sampler.renderAdding(buffer.getWritePointer(0), buffer.getWritePointer(1), numSamples);
+        renderWithMidi(buffer, midi, numSamples, ht);
         dsp.process(buffer, p);
     }
+    midi.clear();
     outL = dsp.getLevelL();
     outR = dsp.getLevelR();
 }

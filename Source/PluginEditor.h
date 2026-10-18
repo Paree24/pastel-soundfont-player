@@ -5,6 +5,7 @@
 #include "PastelLookAndFeel.h"
 #include "Parameters.h"
 #include "PianoStrip.h"
+#include "PresetBrowser.h"
 
 class PastelEditor;
 
@@ -37,27 +38,36 @@ private:
 
 class PastelEditor : public juce::AudioProcessorEditor,
                      public juce::ChangeListener,
-                     public juce::Timer
+                     public juce::Timer,
+                     public juce::FileDragAndDropTarget
 {
 public:
     explicit PastelEditor(PastelProcessor&);
     ~PastelEditor() override;
 
     void paint(juce::Graphics&) override;
+    void paintOverChildren(juce::Graphics&) override;
     void resized() override;
     void mouseDoubleClick(const juce::MouseEvent&) override;
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void timerCallback() override;
+    // drop an .sfz / .sf2 / audio file anywhere on the editor to load it
+    bool isInterestedInFileDrag(const juce::StringArray& files) override;
+    void filesDropped(const juce::StringArray& files, int x, int y) override;
+    void fileDragEnter(const juce::StringArray&, int, int) override { dropHover = true; repaint(); }
+    void fileDragExit(const juce::StringArray&) override { dropHover = false; repaint(); }
 
 private:
     using Attach = juce::AudioProcessorValueTreeState;
 
     PastelProcessor& proc;
     PastelLookAndFeel lnf;
+    juce::TooltipWindow tooltips { this, 700 }; // makes every setTooltip() text show
 
     // header
     juce::Label logoLabel, fileLabel;
-    juce::TextButton loadBtn { "LOAD" }, prevBtn { "<" }, nextBtn { ">" }, panicBtn { "PANIC" };
+    juce::TextButton loadBtn { "LOAD" }, prevBtn { "<" }, nextBtn { ">" }, panicBtn { "PANIC" },
+                     presetsBtn { "PRESETS" };
     juce::ComboBox bankBox, presetBox;
     juce::Label bankLabel { {}, "Bank" }, presetBoxLabel { {}, "Program" };
 
@@ -98,11 +108,22 @@ private:
     juce::GroupComponent lfoGroup { {}, "LFO -> Filter" };
     juce::GroupComponent fxGroup { {}, "Effects" };
     juce::GroupComponent arpGroup { {}, "Arpeggiator" };
+    juce::GroupComponent voiceGroup { {}, "Voice" };
 
     juce::OwnedArray<juce::GroupComponent> fxCards;
-    juce::Label limCap { {}, "LIMITER" }, monoCap { {}, "MONO" }, syncCap { {}, "SYNC" };
+    juce::Label limCap { {}, "LIMITER" }, monoCap { {}, "MONO" }, syncCap { {}, "SYNC" },
+                latchCap { {}, "LATCH" }, velCap { {}, "VEL" };
+    // arp + voice controls added after the original set (index-free)
+    Knob* swingKnob = nullptr;
+    Knob* glideKnob = nullptr;
+    Switch* latchSwitch = nullptr;
+    Switch* velSwitch = nullptr;
+    Choice* voiceChoice = nullptr;
+    Choice* interpChoice = nullptr;
 
     PianoStrip piano;
+    PresetBrowser presetBrowser;
+    bool dropHover = false;
 
     float meterL = 0.0f, meterR = 0.0f;
     juce::Rectangle<int> meterArea;

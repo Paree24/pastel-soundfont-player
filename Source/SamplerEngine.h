@@ -74,6 +74,9 @@ private:
 // subset parser + polyphonic sample voices.
 // Threading: loadFile/program changes on message thread,
 // render/noteOn/noteOff on audio thread, guarded by lock.
+// UI queries (paths, names, ranges, labels, presets) read a
+// snapshot published at load time under uiLock, which the
+// audio thread never takes, so UI polling can't stall audio.
 // ============================================================
 class SamplerEngine
 {
@@ -84,14 +87,14 @@ public:
     bool loadFile(const juce::String& path, juce::String& errorOut);
     void unload();
 
-    bool isLoaded() const { return loaded; }
+    bool isLoaded() const { return uiLoaded.load(); } // UI-safe
     bool isSf2() const { return loadedSf2; }
     // keyswitch / mapping queries (for keyboard highlight)
     int getLastKeyswitch() const;
     static bool isAudioFile(const juce::File& f);
     std::vector<std::pair<int,int>> getMappedRanges() const;
     std::vector<std::pair<int,int>> getSwitchRanges() const;
-    juce::String currentPath() const; // lock-protected (swapped by background loads)
+    juce::String currentPath() const; // UI snapshot (swapped by background loads)
     juce::String currentName() const;
     juce::String programName() const;
 
@@ -142,7 +145,19 @@ public:
     void allNotesOff();
     void panic();
 
+    // Performance controls (audio thread, lock-protected).
+    // Bend is bipolar -1..1: SFZ scales it by each region's bend_up /
+    // bend_down (default +-200 cents), SF2 sends it to tsf (+-2 st).
+    void setPitchBend(float bipolar);
+    // CC64: while down, note-offs are held until the pedal comes up.
+    void setSustain(bool down);
+    // 0 poly, 1 mono (retrigger), 2 legato (held notes retune the sounding
+    // voice). Glide (seconds) slides mono/legato pitch changes.
+    void setVoiceMode(int mode, float glideSecs);
+    void setInterpolation(int mode); // 0 linear 1 cubic 2 sinc HQ
+
     // Adds sampler output into dest (not cleared). dest must hold numSamples.
+    // Delayed (delay=) region starts fire on their exact sample.
     void renderAdding(float* destL, float* destR, int numSamples);
 
 private:
@@ -200,6 +215,7 @@ private:
         float filKeytrack = 0.0f; // cents per key above MIDI 60
         float filVeltrack = 0.0f; // cents added at velocity 1
         std::map<int,float> filtCcDepth; // cutoff_ccN depths: last wins per CC (sfizz)
+        float bendUp = 200.0f, bendDown = -200.0f; // cents at full wheel (sfz defaults)
     };
 
     struct Voice
@@ -223,6 +239,10 @@ private:
         float cutHz = 19000.0f;
         int filtType = 0;
         float filtRes = 0.0f;
+        // glide (mono/legato): semitone offset from the voice's own pitch,
+        // slid toward glideTarget at glideRate semitones per sample
+        double glideSemis = 0.0, glideTarget = 0.0, glideRate = 0.0;
+        double curRatio = 1.0; // ratio incl. bend + glide for the current chunk
     };
 
     bool parseSfz(const juce::String& text, const juce::File& sfzDir); // false = cancelled
@@ -235,6 +255,19 @@ private:
     // region matching + voice start (lock must be held)
     int findRegionIdx(int note, int vel, int wantTrigger, int startAfter, int randRoll) const;
     bool startVoice(int regionIdx, int note, float vel, bool fromNoteOn);
+    // note logic below the voice-mode layer (lock must be held)
+    void playNoteOn(int midiNote, float vel);
+    void playNoteOff(int midiNote);
+    void releaseNote(int midiNote); // after the sustain pedal check
+    void renderVoices(float* destL, float* destR, int numSamples);
+    void renderSf2(float* destL, float* destR, int numSamples);
+    void publishUiState(); // lock must be held; takes uiLock
+    void setSf2Tune(double now, double target); // tsf channel tuning (SF2 mono glide)
+    bool loadFileLocked(const juce::String& path, juce::String& errorOut);
+    double monoCurrentPitch() const;
+    void monoRetune(int newNote);  // legato: slide the sounding voice to newNote
+    void monoRelease();            // release the voice the mono stack is sounding
+    void monoStart(int note, float vel, double fromPitch); // retrigger (+ glide)
     // Fire a note: EVERY matching region voices (layers), like the format
     // specifies — first-match-only drops articulation composites. Delay
     // regions queue individually; unstartable ones (offset past EOF, empty
@@ -250,6 +283,16 @@ private:
     static float midiToFreq(int m);
 
     juce::CriticalSection lock;
+    // UI snapshot (published at load/swap; audio thread never takes uiLock)
+    mutable juce::CriticalSection uiLock;
+    std::atomic<bool> uiLoaded { false };
+    juce::String uiPath, uiProgram;
+    std::vector<std::pair<int,int>> uiMapped, uiSwitches;
+    std::map<int, juce::String> uiLabels;
+    std::vector<Sf2Preset> uiPresets;           // sorted (bank, program)
+    std::vector<juce::String> uiPresetNames;    // tsf preset index -> name
+    std::vector<std::pair<int,int>> uiPresetNums; // tsf preset index -> (bank, program)
+    std::atomic<int> sf2ActiveIdx { -1 };       // tsf preset index on channel 0
     juce::AudioFormatManager formats;
     std::atomic<bool>* cancelFlag = nullptr; // load monitor (not swapped)
     std::atomic<float>* progressOut = nullptr;
@@ -279,7 +322,24 @@ private:
     // SF2 data
     tsf* soundfont = nullptr;
     int sf2Bank = 0, sf2Preset = 0;
-    std::vector<float> tsfTemp; // interleaved stereo scratch
+    static constexpr int tsfChunk = 256;
+    float tsfTemp[tsfChunk * 2] = {}; // interleaved stereo scratch (fixed: no audio-thread alloc)
+
+    // performance state (persists across loads/swaps)
+    float bendBipolar = 0.0f;
+    bool sustainDown = false;
+    bool sustained[128] = {};   // key released while the pedal was down
+    bool keyDown[128] = {};     // key physically held (after sustain)
+    int voiceMode = 0;          // 0 poly 1 mono 2 legato
+    double glideSecs = 0.0;
+    int interpMode = 0;
+    // mono/legato key stack (last-note priority), fixed capacity
+    int monoStack[128] = {};
+    int monoCount = 0;
+    int monoNote = -1;          // key the mono voice currently follows
+    int monoBase = -1;          // key its voices were started on (legato retunes from it)
+    double monoPitch = -1.0;    // current sounding pitch (glide origin)
+    double sf2Tune = 0.0, sf2TuneTarget = 0.0, sf2TuneRate = 0.0; // SF2 glide via channel tuning
 
     // basename -> full path cache for relocated-sample search (lock guarded)
     juce::StringArray searchPaths;
@@ -295,7 +355,7 @@ private:
 
     // keyswitch state (sfz); -1 = none pressed yet. sfizz strategy: switched
     // layers stay silent until selected (sw_default = initial selection).
-    int lastKeyswitch = -1;
+    std::atomic<int> lastKeyswitch { -1 };
     std::set<int> swLastKeys; // every sw_last key across the patch (all are switches)
     std::map<int, juce::String> swLabels; // switch key -> sw_label articulation name
     bool isSwitchKey(int note) const;
@@ -305,5 +365,8 @@ private:
     mutable juce::Random rng;
     int lastVel[128] = { 0 };
     struct DelayedNote { int regionIdx; int note; float vel; int trigger; int samplesLeft; };
-    std::vector<DelayedNote> delayed;
+    static constexpr int maxDelayed = 64;
+    DelayedNote delayed[maxDelayed] = {}; // fixed ring: oldest dropped when full
+    int delayedCount = 0;
+    void pushDelayed(const DelayedNote& d);
 };

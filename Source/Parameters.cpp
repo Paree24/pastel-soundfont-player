@@ -27,8 +27,9 @@ APVTS::ParameterLayout createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
     // program
-    p.push_back(floatParam(PP::PRESET, "Preset", 0, 127, 0));
-    p.push_back(floatParam(PP::BANK, "Bank", 0, 127, 0));
+    // ints (stored values are the same 0..127 numbers the old floats saved)
+    p.push_back(std::make_unique<juce::AudioParameterInt>(juce::ParameterID(PP::PRESET, 1), "Preset", 0, 127, 0));
+    p.push_back(std::make_unique<juce::AudioParameterInt>(juce::ParameterID(PP::BANK, 1), "Bank", 0, 127, 0));
     // ADSR (off by default: the soundfont plays as authored). Defaults are
     // neutral: fastest attack, full decay/sustain, tiny release.
     p.push_back(boolParam(PP::ADSRON, "ADSR On", false));
@@ -99,5 +100,13 @@ APVTS::ParameterLayout createParameterLayout()
         { "1/4", "1/4T", "1/4 D", "1/8", "1/8T", "1/8 D", "1/16", "1/16T", "1/16 D", "1/32", "1/32T" }, 3));
     p.push_back(floatParam(PP::ARPOCT, "Arp Octaves", 1.0f, 4.0f, 1.0f));
     p.push_back(floatParam(PP::ARPGATE, "Arp Gate", 0.1f, 1.0f, 0.8f));
+    p.push_back(floatParam(PP::ARPSWING, "Arp Swing", 0.0f, 1.0f, 0.0f));
+    p.push_back(boolParam(PP::ARPLATCH, "Arp Latch", false));
+    p.push_back(boolParam(PP::ARPVEL, "Arp Played Velocity", false));
+    // voice (defaults = the old behaviour: poly, no glide, linear)
+    p.push_back(choiceParam(PP::VMODE, "Voice Mode", { "Poly", "Mono", "Legato" }, 0));
+    p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID(PP::GLIDE, 1), "Glide",
+        juce::NormalisableRange<float>(0.0f, 2.0f, 0.0f, 0.4f), 0.0f, "s"));
+    p.push_back(choiceParam(PP::INTERP, "Interpolation", { "Linear", "Cubic", "Sinc HQ" }, 0));
     return { p.begin(), p.end() };
 }
