@@ -207,6 +207,16 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     addAndMakeVisible(arpGroup);
 
     // envelope: knobs
+    envView = std::make_unique<pastel::EnvView>(proc.apvts, juce::StringArray { PP::ATK, PP::DEC, PP::SUS, PP::REL }, juce::String());
+    envView->setShowValues(false);
+    envView->setTimeSkew(3.0f);   // linear 0..4 s times: spread the short ones out
+    envView->setTooltip("Drag the points: attack, decay / sustain, release (double-click = defaults)");
+    addAndMakeVisible(*envView);
+    filterView = std::make_unique<pastel::FilterView>(proc.apvts, PP::FCUT, PP::FRES, PP::FTYPE, juce::String(), juce::String(),
+        std::vector<pastel::FilterView::Mode> { pastel::FilterView::Mode::lp12, pastel::FilterView::Mode::hp12,
+                                                pastel::FilterView::Mode::bp12 });
+    filterView->setTooltip("Drag: cutoff sideways, resonance up / down");
+    addAndMakeVisible(*filterView);
     addKnob(PP::ATK, "Attack"); addKnob(PP::DEC, "Decay");
     addKnob(PP::SUS, "Sustain"); addKnob(PP::REL, "Release");
 
@@ -301,6 +311,51 @@ PastelEditor::PastelEditor(PastelProcessor& p)
         cap->setColour(juce::Label::textColourId, PastelColors::textDim);
         addAndMakeVisible(cap);
     }
+
+    // ---- v3 views + segmented switches (what they stand in for stays attached, hidden) ----
+    {
+        using pastel::Wave;
+        auto keep = [&](auto* c) { addAndMakeVisible(c); v3.emplace_back(c); return c; };
+        auto seg = [&](const juce::String& id, juce::StringArray labels, std::vector<Wave> icons = {})
+        {
+            return keep(new pastel::SegChoice(proc.apvts, id, std::move(labels), std::move(icons)));
+        };
+        envView->setShowValues(true);                      // the envelope card is just the graph
+        for (int i = 0; i < 4; ++i) { knobs[(size_t) i]->s->setVisible(false); knobs[(size_t) i]->l->setVisible(false); }
+        for (int i = 4; i < 6; ++i) { knobs[(size_t) i]->s->setVisible(false); knobs[(size_t) i]->l->setVisible(false); } // cutoff / reso: on the graph
+        ftypeSeg = seg(PP::FTYPE, { "LP", "HP", "BP" });
+        fslopeSeg = seg(PP::FSLOPE, { "6", "12", "24", "48" });
+        fslopeSeg->setTooltip("Slope, dB / octave");
+        lfoView = keep(new pastel::LfoView(proc.apvts, PP::LFOWAVE, juce::String(),
+                                           { Wave::sine, Wave::tri, Wave::saw, Wave::square, Wave::snh }));
+        lfoWaveSeg = seg(PP::LFOWAVE, { "", "", "", "", "" }, { Wave::sine, Wave::tri, Wave::saw, Wave::square, Wave::snh });
+        chModeSeg = seg(PP::CHMODE, { "MAN", "I", "II", "WIDE" });
+        saModeSeg = seg(PP::SAMODE, { "TAPE", "TUBE" });
+        arpModeSeg = seg(PP::ARPMODE, { "UP", "DOWN", "UP/DN", "RND" });
+        vmodeSeg = seg(PP::VMODE, { "POLY", "MONO", "LEGATO" });
+        interpSeg = seg(PP::INTERP, { "LINEAR", "CUBIC", "SINC" });
+        interpSeg->setTooltip("Sample interpolation: SINC is cleanest when pitching up, at more CPU");
+        for (int i : { 0, 1, 2, 3, 4, 6 }) { choices[(size_t) i]->c->setVisible(false); choices[(size_t) i]->l->setVisible(false); }
+        voiceChoice->c->setVisible(false); voiceChoice->l->setVisible(false);
+        interpChoice->c->setVisible(false); interpChoice->l->setVisible(false);
+        // each effect card's picture: drag it (two parameters each)
+        using FS = pastel::FxView::Style;
+        fxViews[0] = keep(new pastel::FxView(proc.apvts, FS::chorus, PP::CHRATE, PP::CHDEPTH, PP::CHON));
+        fxViews[1] = keep(new pastel::FxView(proc.apvts, FS::phaser, PP::PHRATE, PP::PHDEPTH, PP::PHON));
+        fxViews[2] = keep(new pastel::FxView(proc.apvts, FS::chorus, PP::FLRATE, PP::FLDEPTH, PP::FLON));
+        fxViews[3] = keep(new pastel::DriveView(proc.apvts, PP::DIDRIVE));
+        fxViews[4] = keep(new pastel::DriveView(proc.apvts, PP::SAAMT, PP::SAMODE));
+        fxViews[5] = keep(new pastel::FxView(proc.apvts, FS::reverb, PP::RVSIZE, PP::RVDAMP, PP::RVON,
+                                             juce::String(), juce::String(), "SIZE", "DAMP"));
+        fxViews[6] = keep(new pastel::FxView(proc.apvts, FS::delay, PP::DLTIME, PP::DLFB, PP::DLON, PP::DLSYNC, PP::DLDIV));
+        const char* tips[7] = { "Drag: rate sideways, depth up / down", "Drag: rate sideways, depth up / down",
+                                "Drag: rate sideways, depth up / down", "Drag up / down: drive",
+                                "Drag up / down: amount", "Drag: size sideways, damping up / down",
+                                "Drag: time sideways (when not synced), feedback up / down" };
+        for (int i = 0; i < 7; ++i)
+            if (auto* tc = dynamic_cast<juce::SettableTooltipClient*>(fxViews[i])) tc->setTooltip(tips[i]);
+    }
+    fxCards.getLast()->setText("Output");
 
     // piano strip (full-bleed, highlights mapped + keyswitch + active notes)
     addAndMakeVisible(piano);
@@ -402,11 +457,18 @@ void PastelEditor::paint(juce::Graphics& g)
     g.fillRoundedRectangle(10, 8, getWidth() - 20, 58, 6.0f);
     g.setColour(PastelColors::panelEdge);
     g.drawRoundedRectangle(10.5f, 8.5f, getWidth() - 21, 57, 6.0f, 1.0f);
-    paintMeter(g, meterArea);
+    // the Pastel family mark: four rounded squares
+    const juce::uint32 cols[4] = { 0xffe88a8a, 0xff8fd0c2, 0xffe9a3b8, 0xffa9d58e };
+    for (int i = 0; i < 4; ++i)
+    {
+        g.setColour(juce::Colour(cols[i]));
+        g.fillRoundedRectangle(22.0f + (float) (i % 2) * 10.0f, 17.0f + (float) (i / 2) * 10.0f, 8.0f, 8.0f, 2.0f);
+    }
 }
 
 void PastelEditor::paintOverChildren(juce::Graphics& g)
 {
+    if (! meterArea.isEmpty()) paintMeter(g, meterArea);   // inside the OUTPUT card
     if (!dropHover) return;
     g.setColour(PastelColors::teal.withAlpha(0.12f));
     g.fillRect(getLocalBounds());
@@ -450,7 +512,8 @@ void PastelEditor::resized()
     // mirroring the title's left inset — same spot on every card
     auto placeHeaderSwitch = [&](juce::ToggleButton& b, juce::Rectangle<int> card)
     {
-        b.setBounds(card.getRight() - 52, card.getY() + 3, 46, 20);
+        b.getProperties().set("power", true);   // v3: section on/off is the power glyph
+        b.setBounds(card.getRight() - 30, card.getY() + 2, 24, 22);
     };
     // caption-above-combo pair anchored to a card's bottom edge
     auto placeChoiceBottom = [&](Choice& c, juce::Rectangle<int> card, int x, int w)
@@ -465,8 +528,8 @@ void PastelEditor::resized()
     };
 
     // ---------- header (panel y 8..66, centre 37) ----------
-    logoLabel.setBounds(M + pad, 13, 220, 24);
-    fileLabel.setBounds(M + pad, 37, 380, 18);
+    logoLabel.setBounds(M + pad + 26, 13, 200, 24);
+    fileLabel.setBounds(M + pad + 26, 37, 360, 18);
     int btnX = M + 400;
     const int btnY = 22, btnH = 30;
     loadBtn.setBounds(btnX, btnY, 76, btnH); btnX += 76 + 6;
@@ -475,9 +538,7 @@ void PastelEditor::resized()
     panicBtn.setBounds(btnX, btnY, 70, btnH); btnX += 70 + 6;
     presetsBtn.setBounds(btnX, btnY, 84, btnH);
 
-    const int meterW = 150;
-    meterArea = { W - M - pad - meterW, 15, meterW, 44 };
-    int rightX = meterArea.getX() - 20;
+    int rightX = W - M - pad;   // v3: the meter lives in the OUTPUT card
     // program box shrinks so it never runs into the transport buttons
     const int bankW = 64;
     const int presetW = juce::jlimit(120, 220, rightX - (presetsBtn.getRight() + 20) - bankW - 10);
@@ -520,7 +581,7 @@ void PastelEditor::resized()
     }
 
     // ----- mid column -----
-    const int envH = (int)(mainH * 0.27), filtH = (int)(mainH * 0.44);
+    const int envH = (int)(mainH * 0.30), filtH = (int)(mainH * 0.38);
     const int lfoH = mainH - envH - filtH - 2 * gap;
     const juce::Rectangle<int> envR(mx, top, midW, envH);
     const juce::Rectangle<int> filtR(mx, envR.getBottom() + gap, midW, filtH);
@@ -539,35 +600,23 @@ void PastelEditor::resized()
         int avail = card.getHeight() - ky - 6 - reserveBottom;
         return card.getY() + ky + juce::jmax(0, (avail - block) / 2);
     };
-    {   // env knobs 0..3
-        int kw = (midW - 2 * pad) / 4;
-        int kh = std::min({ 58, envH - ky - 15 - 6, kw - 8 });
-        int y = centredY(envR, kh + 15, 0);
-        for (int i = 0; i < 4; ++i)
-            placeKnob(*knobs[(size_t) i], mx + pad + i * kw + kw / 2, y, kh, kw);
+    // env: the graph is the whole card (A / D / S / R values on its bottom row)
+    if (envView != nullptr) envView->setBounds(mx + pad, envR.getY() + barH + 2, midW - 2 * pad, envH - barH - 8);
+    {   // filter: the response you drag, then type / slope switches and DRIVE
+        const int rowY = filtR.getBottom() - 44;
+        if (filterView != nullptr) filterView->setBounds(mx + pad, filtR.getY() + barH + 2, midW - 2 * pad, rowY - (filtR.getY() + barH + 2) - 6);
+        ftypeSeg->setBounds(mx + pad, rowY + 6, 96, 22);
+        fslopeSeg->setBounds(mx + pad + 102, rowY + 6, 120, 22);
+        placeKnob(*knobs[6], mx + midW - pad - 26, rowY - 2, 26, 52);
     }
-    {   // filter knobs 4..6 + choices 0,1 (type, slope) at the bottom
-        int kw = (midW - 2 * pad) / 3;
-        int kh = std::min({ 64, filtH - ky - 15 - 52, kw - 8 });
-        int y = centredY(filtR, kh + 15, 52);
-        for (int i = 0; i < 3; ++i)
-            placeKnob(*knobs[(size_t)(4 + i)], mx + pad + i * kw + kw / 2, y, kh, kw);
-        int cw = (midW - 2 * pad - 8) / 2;
-        placeChoiceBottom(*choices[0], filtR, mx + pad, cw);
-        placeChoiceBottom(*choices[1], filtR, mx + pad + cw + 8, cw);
-    }
-    {   // lfo knobs 7,8 in columns 0,1; wave choice fills column 2
-        int kw = (midW - 2 * pad) / 3;
-        int kh = std::min({ 56, lfoH - ky - 15 - 4, kw - 8 });
-        kh = juce::jmax(24, kh);
-        int y = centredY(lfoR, kh + 15, 0);
-        placeKnob(*knobs[7], mx + pad + kw / 2, y, kh, kw);
-        placeKnob(*knobs[8], mx + pad + kw + kw / 2, y, kh, kw);
-        auto* wv = choices[2].get();
-        int wx = mx + pad + 2 * kw, ww = midW - pad - (wx - mx);
-        int comboY = juce::jmin(y + kh / 2 - 4, lfoR.getBottom() - 8 - 24);
-        wv->l->setBounds(wx, comboY - 15, ww, 13);
-        wv->c->setBounds(wx, comboY, ww, 24);
+    {   // lfo: its shape on the left; wave, RATE and DEPTH on the right
+        const int x0 = mx + pad, y0 = lfoR.getY() + barH + 2, h = lfoH - barH - 8;
+        lfoView->setBounds(x0, y0, 120, h);
+        lfoWaveSeg->setBounds(x0 + 128, y0, midW - 2 * pad - 128, 20);
+        const int kh = juce::jlimit(22, 32, h - 20 - 4 - 15);
+        const int kw = (midW - 2 * pad - 128) / 2;
+        placeKnob(*knobs[7], x0 + 128 + kw / 2, y0 + 24, kh, kw);
+        placeKnob(*knobs[8], x0 + 128 + kw + kw / 2, y0 + 24, kh, kw);
     }
 
     // ----- fx grid -----
@@ -613,36 +662,60 @@ void PastelEditor::resized()
     // choices: 0 ftype,1 fslope,2 lfowave,3 chmode,4 samode,5 dldiv,6 arpmode,7 arpdiv
     if (fxCards.size() >= 8)
     {
-        auto inner = [&](juce::Rectangle<int> c) { return std::make_pair(c.getX() + 8, c.getWidth() - 16); };
+        // each card: header power, the picture you drag, a mode switch (if any), a row of knobs
+        auto picture = [&](int i, juce::Rectangle<int> c, int bottomReserve)
+        {
+            fxViews[i]->setBounds(c.getX() + 8, c.getY() + barH + 2, c.getWidth() - 16,
+                                  c.getHeight() - barH - 2 - bottomReserve);
+        };
+        auto knobRow = [&](size_t kStart, int count, juce::Rectangle<int> c)
+        {
+            const int kw = (c.getWidth() - 8) / count;
+            const int kh = juce::jlimit(22, 34, kw - 10);
+            for (int i = 0; i < count; ++i)
+                placeKnob(*knobs[kStart + (size_t) i], c.getX() + 4 + i * kw + kw / 2, c.getBottom() - 8 - 15 - kh, kh, kw);
+        };
+        const int rowH = 58, segH = 28;
+        auto segRow = [&](juce::Component& s, juce::Rectangle<int> c)
+        {
+            s.setBounds(c.getX() + 8, c.getBottom() - rowH - segH + 2, c.getWidth() - 16, 20);
+        };
         placeHeaderSwitch(*switches[0]->b, cardR[0]);              // chorus
-        placeKnobs(9, 3, cardR[0], 3, choiceReserve);
-        placeChoiceBottom(*choices[3], cardR[0], inner(cardR[0]).first, inner(cardR[0]).second);
-
+        picture(0, cardR[0], rowH + segH);
+        segRow(*chModeSeg, cardR[0]);
+        knobRow(9, 3, cardR[0]);
         placeHeaderSwitch(*switches[1]->b, cardR[1]);              // phaser
-        placeKnobs(12, 4, cardR[1], 2, 0);
+        picture(1, cardR[1], rowH + 4);
+        knobRow(12, 4, cardR[1]);
         placeHeaderSwitch(*switches[2]->b, cardR[2]);              // flanger
-        placeKnobs(16, 4, cardR[2], 2, 0);
+        picture(2, cardR[2], rowH + 4);
+        knobRow(16, 4, cardR[2]);
         placeHeaderSwitch(*switches[3]->b, cardR[3]);              // distortion
-        placeKnobs(20, 2, cardR[3], 2, 0);
-
+        picture(3, cardR[3], rowH + 4);
+        knobRow(20, 2, cardR[3]);
         placeHeaderSwitch(*switches[4]->b, cardR[4]);              // saturation
-        placeKnobs(22, 2, cardR[4], 2, choiceReserve);
-        placeChoiceBottom(*choices[4], cardR[4], inner(cardR[4]).first, inner(cardR[4]).second);
-
+        picture(4, cardR[4], rowH + segH);
+        segRow(*saModeSeg, cardR[4]);
+        knobRow(22, 2, cardR[4]);
         placeHeaderSwitch(*switches[5]->b, cardR[5]);              // reverb
-        placeKnobs(24, 3, cardR[5], 3, 0);
-
+        picture(5, cardR[5], rowH + 4);
+        knobRow(24, 3, cardR[5]);
         auto d = cardR[6];                                          // delay
         placeHeaderSwitch(*switches[6]->b, d);
-        placeKnobs(27, 3, d, 3, choiceReserve);
-        // sync toggle + caption mirror the Div caption/combo pair
-        syncCap.setBounds(d.getX() + 6, d.getBottom() - 46, 44, 13);
-        switches[7]->b->setBounds(d.getX() + 6, d.getBottom() - 30, 44, 20);
-        placeChoiceBottom(*choices[5], d, d.getX() + 54, d.getWidth() - 62);
+        picture(6, d, rowH + segH);
+        {   // SYNC switch + division on one row
+            const int ry = d.getBottom() - rowH - segH + 2;
+            syncCap.setBounds(d.getX() + 6, ry + 3, 34, 13);
+            switches[7]->b->setBounds(d.getX() + 38, ry, 40, 20);
+            choices[5]->l->setVisible(false);
+            choices[5]->c->setBounds(d.getX() + 82, ry - 1, d.getWidth() - 90, 22);
+        }
+        knobRow(27, 3, d);
 
-        auto m = cardR[7];                                          // master
-        int kh = std::min({ 64, m.getHeight() - ky - 15 - 50, m.getWidth() - 24 });
-        placeKnob(*knobs[30], m.getCentreX(), centredY(m, kh + 15, choiceReserve), kh, m.getWidth() - 16);
+        auto m = cardR[7];                                          // output
+        meterArea = { m.getX() + 10, m.getY() + barH + 4, m.getWidth() - 20, 34 };
+        int kh = std::min({ 56, m.getHeight() - barH - 40 - 15 - 50, m.getWidth() - 24 });
+        placeKnob(*knobs[30], m.getCentreX(), m.getY() + barH + 44 + juce::jmax(0, (m.getHeight() - barH - 44 - 50 - kh - 15) / 2), kh, m.getWidth() - 16);
         int swY = m.getBottom() - 8 - 13 - 20;
         int cxm = m.getCentreX();
         switches[8]->b->setBounds(cxm - 50, swY, 46, 20);
@@ -651,44 +724,37 @@ void PastelEditor::resized()
         monoCap.setBounds(cxm + 4 - 6, swY + 21, 58, 12);
     }
 
-    // ---------- arp strip + voice card ----------
-    const int voiceW = 330;
+    // ---------- arp + playing rows ----------
+    const int voiceW = 470;
     const juce::Rectangle<int> arpR(M, top + mainH + gap, W - 2 * M - voiceW - gap, arpH);
     const juce::Rectangle<int> voiceR(arpR.getRight() + gap, arpR.getY(), voiceW, arpH);
     arpGroup.setBounds(arpR);
     voiceGroup.setBounds(voiceR);
     placeHeaderSwitch(*switches[9]->b, arpR);
     {
-        int cy = arpR.getY() + barH + 4;  // content top
-        auto* md = choices[6].get();
-        md->l->setBounds(arpR.getX() + pad, cy + 4, 120, 13);
-        md->c->setBounds(arpR.getX() + pad, cy + 19, 120, 24);
+        const int cy = arpR.getY() + barH + 4, rowY = cy + 18;   // controls centred on rowY + 11
+        int x = arpR.getX() + pad;
+        arpModeSeg->setBounds(x, rowY, 200, 22); x += 208;
         auto* dv = choices[7].get();
-        dv->l->setBounds(arpR.getX() + pad + 132, cy + 4, 100, 13);
-        dv->c->setBounds(arpR.getX() + pad + 132, cy + 19, 100, 24);
-        // knob centres line up with the combo centres (cy + 31)
-        const int kh = 40;
-        int kx = arpR.getX() + pad + 132 + 100 + 44;
-        placeKnob(*knobs[31], kx, cy + 31 - kh / 2 - 6, kh, 60);
-        placeKnob(*knobs[32], kx + 64, cy + 31 - kh / 2 - 6, kh, 60);
-        placeKnob(*swingKnob, kx + 128, cy + 31 - kh / 2 - 6, kh, 60);
-        // latch / vel toggles + captions, like the master card's
-        int sx = kx + 128 + 54;
-        latchSwitch->b->setBounds(sx, cy + 21, 46, 20);
-        latchCap.setBounds(sx - 6, cy + 42, 58, 12);
-        velSwitch->b->setBounds(sx + 58, cy + 21, 46, 20);
-        velCap.setBounds(sx + 58 - 6, cy + 42, 58, 12);
+        dv->l->setBounds(x, cy + 2, 90, 13);
+        dv->c->setBounds(x, rowY - 1, 90, 24); x += 100;
+        const int kh = 34;
+        placeKnob(*knobs[31], x + 26, rowY + 11 - kh / 2 - 6, kh, 52);
+        placeKnob(*knobs[32], x + 26 + 56, rowY + 11 - kh / 2 - 6, kh, 52);
+        placeKnob(*swingKnob, x + 26 + 112, rowY + 11 - kh / 2 - 6, kh, 52);
+        int sx = x + 26 + 112 + 44;
+        latchSwitch->b->setBounds(sx, rowY + 1, 46, 20);
+        latchCap.setBounds(sx - 6, rowY + 22, 58, 12);
+        velSwitch->b->setBounds(sx + 58, rowY + 1, 46, 20);
+        velCap.setBounds(sx + 58 - 6, rowY + 22, 58, 12);
     }
     {
-        int cy = voiceR.getY() + barH + 4;
+        const int cy = voiceR.getY() + barH + 4, rowY = cy + 18;
         int x = voiceR.getX() + pad;
-        voiceChoice->l->setBounds(x, cy + 4, 104, 13);
-        voiceChoice->c->setBounds(x, cy + 19, 104, 24);
-        const int kh = 40;
-        placeKnob(*glideKnob, x + 104 + 40, cy + 31 - kh / 2 - 6, kh, 60);
-        int ix = x + 104 + 80;
-        interpChoice->l->setBounds(ix, cy + 4, voiceR.getRight() - pad - ix, 13);
-        interpChoice->c->setBounds(ix, cy + 19, voiceR.getRight() - pad - ix, 24);
+        vmodeSeg->setBounds(x, rowY, 180, 22); x += 188;
+        const int kh = 34;
+        placeKnob(*glideKnob, x + 26, rowY + 11 - kh / 2 - 6, kh, 52); x += 60;
+        interpSeg->setBounds(x, rowY, voiceR.getRight() - pad - x, 22);
     }
 
     piano.setBounds(M, arpR.getBottom() + gap, W - 2 * M, kbH);
@@ -867,6 +933,14 @@ void PastelEditor::changeListenerCallback(juce::ChangeBroadcaster* src)
 void PastelEditor::timerCallback()
 {
     piano.updateActive();
+    // the drive curves dim with their effect's power (the FX pads show BYPASSED themselves)
+    const std::pair<int, juce::String> curvePower[] { { 3, PP::DION }, { 4, PP::SAON } };
+    for (auto& [i, id] : curvePower)
+        if (auto* raw = proc.apvts.getRawParameterValue(id); raw != nullptr && fxViews[i] != nullptr)
+        {
+            const float a = raw->load() > 0.5f ? 1.0f : 0.4f;
+            if (fxViews[i]->getAlpha() != a) fxViews[i]->setAlpha(a);
+        }
     {
         int b = (int) proc.apvts.getRawParameterValue(PP::BANK)->load();
         int pr = (int) proc.apvts.getRawParameterValue(PP::PRESET)->load();

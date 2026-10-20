@@ -6,6 +6,7 @@
 #include "Parameters.h"
 #include "PianoStrip.h"
 #include "PresetBrowser.h"
+#include "PastelViews.h"
 
 class PastelEditor;
 
@@ -101,6 +102,15 @@ private:
     };
     std::vector<std::unique_ptr<Knob>> knobs;
     std::vector<std::unique_ptr<Switch>> switches;
+    std::unique_ptr<pastel::EnvView> envView;       // v3: drag the envelope
+    std::unique_ptr<pastel::FilterView> filterView; // v3: drag the filter response
+    // v3 (mockup/redesign_v3.png): views and segmented switches in place of knob walls /
+    // combos; the knobs and combos they stand in for stay attached, just hidden
+    std::vector<std::unique_ptr<juce::Component>> v3;
+    pastel::LfoView* lfoView = nullptr;
+    pastel::SegChoice *ftypeSeg = nullptr, *fslopeSeg = nullptr, *lfoWaveSeg = nullptr, *chModeSeg = nullptr,
+                      *saModeSeg = nullptr, *arpModeSeg = nullptr, *vmodeSeg = nullptr, *interpSeg = nullptr;
+    juce::Component* fxViews[7] {};
     std::vector<std::unique_ptr<Choice>> choices;
 
     juce::GroupComponent envGroup { {}, "Envelope" };
@@ -108,7 +118,7 @@ private:
     juce::GroupComponent lfoGroup { {}, "LFO -> Filter" };
     juce::GroupComponent fxGroup { {}, "Effects" };
     juce::GroupComponent arpGroup { {}, "Arpeggiator" };
-    juce::GroupComponent voiceGroup { {}, "Voice" };
+    juce::GroupComponent voiceGroup { {}, "Playing" };
 
     juce::OwnedArray<juce::GroupComponent> fxCards;
     juce::Label limCap { {}, "LIMITER" }, monoCap { {}, "MONO" }, syncCap { {}, "SYNC" },

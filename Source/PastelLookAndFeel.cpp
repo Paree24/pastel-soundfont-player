@@ -1,4 +1,5 @@
 #include "PastelLookAndFeel.h"
+#include "PastelViews.h"
 #include "PastelAssets.h"
 
 PastelLookAndFeel::PastelLookAndFeel()
@@ -9,6 +10,20 @@ PastelLookAndFeel::PastelLookAndFeel()
                                                        PastelAssets::LatoBold_ttfSize);
     latoBlack = juce::Typeface::createSystemTypefaceFor(PastelAssets::LatoBlack_ttf,
                                                        PastelAssets::LatoBlack_ttfSize);
+    // the shared v3 views draw in the player's teal + Lato
+    pastel::Theme::accent = PastelColors::teal;    pastel::Theme::inner = juce::Colour(0xFF16181C);
+    pastel::Theme::grid = juce::Colour(0xFF24272C); pastel::Theme::edge = PastelColors::knobEdge;
+    pastel::Theme::comboBg = PastelColors::comboBg; pastel::Theme::text = PastelColors::text;
+    pastel::Theme::textDim = PastelColors::textDim; pastel::Theme::faint = juce::Colour(0xFF5C5A56);
+    pastel::Theme::handle = juce::Colour(0xFFF4F1EC); pastel::Theme::ink = PastelColors::barText;
+    pastel::Theme::regular = latoReg;              pastel::Theme::bold = latoBold;
+    pastel::Theme::format = [](const juce::String& id, float v) -> juce::String   // stateless
+    {
+        if (id == "fcut") return v >= 1000.0f ? juce::String(v / 1000.0f, 2) + " kHz" : juce::String(juce::roundToInt(v)) + " Hz";
+        if (id == "atk" || id == "dec" || id == "rel")
+            return v < 1.0f ? juce::String(juce::roundToInt(v * 1000.0f)) + " ms" : juce::String(v, 2) + " s";
+        return juce::String(juce::roundToInt(v * 100.0f)) + "%";
+    };
     setColour(juce::Label::textColourId, PastelColors::text);
     setColour(juce::ComboBox::textColourId, PastelColors::text);
     setColour(juce::ComboBox::backgroundColourId, PastelColors::comboBg);
@@ -139,20 +154,36 @@ void PastelLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w,
 
 void PastelLookAndFeel::drawToggleButton(juce::Graphics& g, juce::ToggleButton& b, bool, bool)
 {
-    // textless pill switch: identical colors on/off, state shown by knob side
     bool on = b.getToggleState();
+    const auto accent = PastelLookAndFeel::accentFor(b);
     float w = (float)b.getWidth(), h = (float)b.getHeight();
+    if ((bool) b.getProperties()["power"])
+    {
+        // v3 section on/off: the EFX Grid power glyph
+        const auto c = on ? accent : PastelColors::knobEdge.brighter(0.25f);
+        const float cx = w * 0.5f, cy = h * 0.5f, rad = 8.5f, ir = rad * 0.52f;
+        g.setColour(c);
+        g.drawEllipse(cx - rad, cy - rad, rad * 2, rad * 2, 1.4f);
+        juce::Path arc;
+        arc.addCentredArc(cx, cy, ir, ir, 0.0f, juce::degreesToRadians(35.0f), juce::degreesToRadians(325.0f), true);
+        g.strokePath(arc, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        g.drawLine(cx, cy - ir - 1.5f, cx, cy - 0.5f, 1.4f);
+        return;
+    }
+    // textless pill switch: the track fills with the accent when on
     float pw = juce::jmin(w - 4.0f, 40.0f), ph = juce::jmin(h - 4.0f, 16.0f);
     float px = (w - pw) * 0.5f, py = (h - ph) * 0.5f;
-    g.setColour(PastelColors::track);
+    g.setColour(on ? accent : PastelColors::track);
     g.fillRoundedRectangle(px, py, pw, ph, ph * 0.5f);
-    g.setColour(PastelColors::knobEdge);
-    g.drawRoundedRectangle(px + 0.5f, py + 0.5f, pw - 1, ph - 1, ph * 0.5f, 1.0f);
+    if (! on)
+    {
+        g.setColour(PastelColors::knobEdge);
+        g.drawRoundedRectangle(px + 0.5f, py + 0.5f, pw - 1, ph - 1, ph * 0.5f, 1.0f);
+    }
     float knobR = ph - 5.0f;
     float kx = on ? px + pw - knobR - 2.5f : px + 2.5f;
-    g.setColour(PastelColors::text);
+    g.setColour(on ? PastelColors::barText : PastelColors::text);
     g.fillEllipse(kx, py + 2.5f, knobR, knobR);
-    juce::ignoreUnused(b);
 }
 
 void PastelLookAndFeel::drawComboBox(juce::Graphics& g, int w, int h, bool,
@@ -163,9 +194,11 @@ void PastelLookAndFeel::drawComboBox(juce::Graphics& g, int w, int h, bool,
     g.setColour(box.hasKeyboardFocus(true) ? PastelLookAndFeel::accentFor(box) : PastelColors::knobEdge);
     g.drawRoundedRectangle(0.5f, 0.5f, w - 1, h - 1, 4.0f, 1.0f);
     juce::Path arrow;
-    arrow.addTriangle(w - 16.0f, h * 0.5f - 3, w - 8.0f, h * 0.5f - 3, w - 12.0f, h * 0.5f + 3);
-    g.setColour(PastelLookAndFeel::accentFor(box));
-    g.fillPath(arrow);
+    arrow.startNewSubPath(w - 15.0f, h * 0.5f - 2.0f);
+    arrow.lineTo(w - 11.0f, h * 0.5f + 2.0f);
+    arrow.lineTo(w - 7.0f, h * 0.5f - 2.0f);
+    g.setColour(PastelColors::textDim);
+    g.strokePath(arrow, juce::PathStrokeType(1.4f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     juce::ignoreUnused(box);
 }
 
@@ -173,19 +206,17 @@ void PastelLookAndFeel::drawGroupComponentOutline(juce::Graphics& g, int w, int 
                                          const juce::String& text,
                                          const juce::Justification&, juce::GroupComponent& group)
 {
+    // v3 card: neutral edge, accent dot + title (no solid bar)
     g.setColour(PastelColors::panel);
-    g.fillRoundedRectangle(0, 0, w, h, 5.0f);
-    juce::Colour accent = PastelLookAndFeel::accentFor(group);
-    g.setColour(accent);
-    g.drawRoundedRectangle(0.5f, 0.5f, w - 1, h - 1, 5.0f, 1.0f);
-    const float barH = 24.0f;
-    g.setColour(accent);
-    g.fillRoundedRectangle(1, 1, w - 2, barH, 4.0f);
-    g.fillRect(1, (int)(barH - 5), w - 2, 5);
-    g.setColour(PastelColors::barText);
-    g.setFont(titleFont(13.0f));
-    // keep clear of the title-bar toggle on the right; squeeze long titles
-    g.drawFittedText(text.toUpperCase(), 10, 0, w - 66, (int)barH,
+    g.fillRoundedRectangle(0, 0, (float) w, (float) h, 8.0f);
+    g.setColour(PastelColors::panelEdge);
+    g.drawRoundedRectangle(0.5f, 0.5f, w - 1.0f, h - 1.0f, 8.0f, 1.0f);
+    g.setColour(PastelLookAndFeel::accentFor(group));
+    g.fillEllipse(11.0f, 9.4f, 7.2f, 7.2f);
+    g.setColour(PastelColors::text);
+    g.setFont(logoFont(12.5f));
+    // keep clear of the header power glyph on the right; squeeze long titles
+    g.drawFittedText(text.toUpperCase(), 24, 0, w - 58, 26,
                      juce::Justification::centredLeft, 1, 0.75f);
 }
 

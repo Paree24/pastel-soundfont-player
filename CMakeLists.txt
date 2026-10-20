@@ -50,6 +50,7 @@ juce_generate_juce_header(PastelPlayer)
 target_sources(PastelPlayer PRIVATE
   Source/PluginProcessor.cpp
   Source/PluginEditor.cpp
+  Source/PastelViews.cpp
   Source/PastelLookAndFeel.cpp
   Source/SamplerEngine.cpp
   Source/TsfImpl.cpp
@@ -82,6 +83,7 @@ juce_add_console_app(PastelHarness PRODUCT_NAME "PastelHarness")
 target_sources(PastelHarness PRIVATE
   Source/PluginProcessor.cpp
   Source/PluginEditor.cpp
+  Source/PastelViews.cpp
   Source/PastelLookAndFeel.cpp
   Source/SamplerEngine.cpp
   Source/TsfImpl.cpp
