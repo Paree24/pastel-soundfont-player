@@ -2883,6 +2883,29 @@ int main(int argc, char** argv)
         check(std::abs(straight - 5512) <= 32 && std::abs(swung - 8268) <= 32, "arp locks to the host grid, swing delays odd steps");
         setP(PP::ARPSWING, 0.0f);
 
+        // dotted from bar 2: steps count from the key in host beats (a song-start
+        // lattice put 1/8D between beats: first step on 4.5, not on the bar)
+        {
+            setP(PP::ARPDIV, 5.0f); // 1/8 D = 0.75 beats
+            int first60 = -1, first64 = -1;
+            for (int pos = 0; pos < 44100 && first64 < 0; pos += 32)
+            {
+                head.ppq = 4.0 + pos / beatSamples;
+                juce::AudioBuffer<float> b(2, 32); b.clear();
+                juce::MidiBuffer m = pos == 0 ? chord : juce::MidiBuffer();
+                ap.processBlock(b, m);
+                for (int n : ap.getActiveNotes())
+                {
+                    if (n == 60 && first60 < 0) first60 = pos;
+                    if (n == 64 && first64 < 0) first64 = pos;
+                }
+            }
+            juce::Logger::writeToLog("arp 1/8D from bar 2: step0=" + juce::String(first60) + " step1=" + juce::String(first64));
+            check(first60 >= 0 && first60 <= 32 && std::abs(first64 - 16537) <= 32, "dotted arp counts from the key, not song beat 0");
+            ap.panic();
+            setP(PP::ARPDIV, 6.0f);
+        }
+
         // latch: the pattern keeps running after the keys go up
         setP(PP::ARPLATCH, 1.0f);
         juce::MidiBuffer tap;

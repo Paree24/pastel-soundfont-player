@@ -333,7 +333,8 @@ void PastelProcessor::arpReset()
     std::fill(std::begin(arpKeyDown), std::end(arpKeyDown), false);
     arpSamplesUntilNext = 0.0;
     arpGridIdx = 0;
-    arpLastGridIdx = std::numeric_limits<long long>::min();
+    arpLastFiredBeat = -std::numeric_limits<double>::infinity();
+    arpAnchor = 0.0; arpPhraseStart = false;
     arpStep = 0; arpLastNote = -1;
 }
 
@@ -409,6 +410,7 @@ void PastelProcessor::arpKeyOn(int note, float vel)
     bool anyDown = false;
     for (bool d : arpKeyDown) anyDown = anyDown || d;
     if (latch && !anyDown) arpHeldCount = 0; // latched: a fresh press starts a new chord
+    if (arpHeldCount == 0) arpPhraseStart = true;
     arpKeyDown[note] = true;
     for (int i = 0; i < arpHeldCount; ++i)
         if (arpHeld[i] == note) { arpHeldVel[i] = vel; return; }
@@ -502,16 +504,25 @@ void PastelProcessor::renderWithMidi(juce::AudioBuffer<float>& target, juce::Mid
         if (!anyDown) arpHeldCount = 0;
     }
 
+    // host-locked: steps count in host beats from the phrase's first key (anchor),
+    // so they follow the host tempo and dotted rates start where the phrase does
+    auto stepAt = [&](long long k) { return arpAnchor + arpStepBeat(k, stepBeats, swing); };
     if (grid)
     {
-        // host-locked: the next step is the first grid line at/after the block
-        // start that has not fired yet (a transport jump back re-arms the grid)
-        if (ht.ppq < arpPrevPpq - 1.0e-6) arpLastGridIdx = std::numeric_limits<long long>::min();
-        long long k = (long long) std::floor(ht.ppq / stepBeats) - 1;
-        while (arpStepBeat(k, stepBeats, swing) < ht.ppq - 1.0e-9 || k <= arpLastGridIdx) ++k;
+        // transport start, or a loop / seek jump: the pattern restarts here
+        if (std::abs(ht.ppq - arpPrevPpq) > 1.0e-3)
+        {
+            arpAnchor = ht.ppq;
+            arpLastFiredBeat = -std::numeric_limits<double>::infinity();
+            arpStep = 0;
+        }
+        // the first step at/after the block start not fired yet (by beat, so a
+        // rate change can't strand the arp behind a stale step number)
+        long long k = (long long) std::floor((ht.ppq - arpAnchor) / stepBeats) - 1;
+        while (stepAt(k) < ht.ppq - 1.0e-9 || stepAt(k) <= arpLastFiredBeat + 1.0e-9) ++k;
         arpGridIdx = k;
-        arpSamplesUntilNext = (arpStepBeat(k, stepBeats, swing) - ht.ppq) * spb;
-        arpPrevPpq = ht.ppq;
+        arpSamplesUntilNext = (stepAt(k) - ht.ppq) * spb;
+        arpPrevPpq = ht.ppq + numSamples / spb;
     }
     else arpPrevPpq = -1.0e9;
 
@@ -535,6 +546,12 @@ void PastelProcessor::renderWithMidi(juce::AudioBuffer<float>& target, juce::Mid
                 arpOffs[i] = arpOffs[--arpOffCount];
             }
             if (arpHeldCount == 0) arpStep = 0;
+            if (arpPhraseStart)
+            {
+                // first key of a phrase: step 0 sounds on it, the rest count from here
+                arpPhraseStart = false;
+                if (grid) { arpAnchor = ht.ppq + pos / spb; arpGridIdx = 0; arpSamplesUntilNext = 0.0; }
+            }
             while (arpSamplesUntilNext <= 0.0)
             {
                 if (arpHeldCount == 0 && !grid) { arpSamplesUntilNext = 0.0; arpGridIdx = 0; break; }
@@ -553,7 +570,7 @@ void PastelProcessor::renderWithMidi(juce::AudioBuffer<float>& target, juce::Mid
                         arpOffs[arpOffCount++] = { n, juce::jmax(1, (int) (stepLen * gate * 0.98)) };
                     arpStep++;
                 }
-                if (grid) arpLastGridIdx = arpGridIdx;
+                if (grid) arpLastFiredBeat = stepAt(arpGridIdx);
                 arpSamplesUntilNext += (arpStepBeat(arpGridIdx + 1, stepBeats, swing)
                                         - arpStepBeat(arpGridIdx, stepBeats, swing)) * spb;
                 ++arpGridIdx;

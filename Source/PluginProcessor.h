@@ -120,8 +120,10 @@ private:
     int arpOffCount = 0;
     double arpSamplesUntilNext = 0.0;
     long long arpGridIdx = 0;          // index of the next step on the beat grid
-    long long arpLastGridIdx = 0;      // host-locked: last grid step fired
-    double arpPrevPpq = -1.0e9;
+    double arpLastFiredBeat = 0.0;     // host-locked: beat of the last step fired
+    double arpAnchor = 0.0;            // host beat of the phrase's step 0 (its first key)
+    bool arpPhraseStart = false;       // first key of a phrase arrived: restart the count
+    double arpPrevPpq = -1.0e9;        // where this block should start if the transport ran on
     int arpStep = 0;                   // position in the pattern
     int arpLastNote = -1;
     bool arpWasOn = false;
