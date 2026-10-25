@@ -165,7 +165,7 @@ static void sf2List(std::vector<char>& o, const char* type, const std::vector<ch
     o.insert(o.end(), d.begin(), d.end());
     if ((d.size() + 4) & 1) o.push_back(0);
 }
-static void writeMinimalSf2(const juce::File& f, float freq)
+static void writeMinimalSf2(const juce::File& f, float freq, int presets = 1)
 {
     const int N = 44100;
     std::vector<char> smpl;
@@ -191,19 +191,23 @@ static void writeMinimalSf2(const juce::File& f, float freq)
     std::vector<char> igen;
     sf2PutU16(igen, 53); sf2PutU16(igen, 0); // sampleID 0
     sf2PutU16(igen, 0); sf2PutU16(igen, 0);  // terminal
+    // presets > 1: programs 0..n-1 in bank 0, each its own zone on instrument 0
     std::vector<char> phdr;
-    sf2PutStr(phdr, "TestPreset", 20);
-    sf2PutU16(phdr, 0); sf2PutU16(phdr, 0); sf2PutU16(phdr, 0); // preset 0 bank 0 bag 0
-    sf2PutU32(phdr, 0); sf2PutU32(phdr, 0); sf2PutU32(phdr, 0);
+    for (int i = 0; i < presets; ++i)
+    {
+        sf2PutStr(phdr, i == 0 ? "TestPreset" : ("TestPreset" + std::to_string(i)).c_str(), 20);
+        sf2PutU16(phdr, (uint16_t) i); sf2PutU16(phdr, 0); sf2PutU16(phdr, (uint16_t) i); // preset i bank 0 bag i
+        sf2PutU32(phdr, 0); sf2PutU32(phdr, 0); sf2PutU32(phdr, 0);
+    }
     sf2PutStr(phdr, "EOP", 20);
-    sf2PutU16(phdr, 0); sf2PutU16(phdr, 0); sf2PutU16(phdr, 1); // terminal bagNdx=1
+    sf2PutU16(phdr, 0); sf2PutU16(phdr, 0); sf2PutU16(phdr, (uint16_t) presets); // terminal bagNdx
     sf2PutU32(phdr, 0); sf2PutU32(phdr, 0); sf2PutU32(phdr, 0);
     std::vector<char> pbag;
-    sf2PutU16(pbag, 0); sf2PutU16(pbag, 0);
-    sf2PutU16(pbag, 2); sf2PutU16(pbag, 1); // terminal: 2 gens, 1 mod
+    for (int i = 0; i < presets; ++i) { sf2PutU16(pbag, (uint16_t) i); sf2PutU16(pbag, 0); }
+    sf2PutU16(pbag, (uint16_t) (presets + 1)); sf2PutU16(pbag, 1); // terminal: gens, 1 mod
     std::vector<char> pmod(10, 0);
     std::vector<char> pgen;
-    sf2PutU16(pgen, 41); sf2PutU16(pgen, 0); // instrument 0
+    for (int i = 0; i < presets; ++i) { sf2PutU16(pgen, 41); sf2PutU16(pgen, 0); } // instrument 0
     sf2PutU16(pgen, 0); sf2PutU16(pgen, 0);  // terminal
 
     std::vector<char> info, sdta, pdta, tmp;
@@ -256,6 +260,9 @@ int main(int argc, char** argv)
     setenv("PASTEL_SETTINGS_FOLDER", "PastelPlayerTest", 1); // isolated settings
 #endif
     juce::ScopedJuceInitialiser_GUI juceInit;
+    pastel::MidiLearn::setDirectoryForTest(juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                               .getChildFile("pastel_harness_test").getChildFile("midilearn"));
+    pastel::MidiLearn::fileFor("Pastel Soundfont Player").deleteFile(); // never the user's ~/.config
 
     // UI snapshot: PASTEL_SNAPSHOT=out.png [PASTEL_SNAPSHOT_SIZE=WxH]
     // renders the editor offscreen (layout review) and exits.
@@ -286,6 +293,95 @@ int main(int argc, char** argv)
     writeTone(wavFile, 440.0f);
     auto sfzFile = tmp.getChildFile("test.sfz");
     sfzFile.replaceWithText("<region> sample=tone.wav key=60 lokey=0 hikey=127 pitch_keycenter=60\n");
+
+    juce::Logger::writeToLog("--- MIDI learn (global CC map, preset knob) ---");
+    {
+        using Enc = pastel::MidiLearn::Enc;
+        auto det = [](std::vector<int> v) { return pastel::MidiLearn::detectEncoding(v); };
+        check(det({ 65, 65, 65, 65 }) == Enc::offset64 && det({ 63, 62, 63 }) == Enc::offset64, "Arturia-style 64+n encoder detected");
+        check(det({ 1, 1, 2, 1 }) == Enc::twos && det({ 127, 127, 126 }) == Enc::twos, "two's complement encoder detected");
+        check(det({ 60, 61, 62, 63 }) == Enc::absolute && det({ 0, 1, 2, 3 }) == Enc::absolute
+              && det({ 127, 126, 125, 124 }) == Enc::absolute, "turned absolute knob stays absolute");
+
+        auto cc = [](int num, int val) { juce::MidiBuffer m; m.addEvent(juce::MidiMessage::controllerEvent(1, num, val), 0); return m; };
+        std::unique_ptr<PastelProcessor> a(new PastelProcessor());
+        auto& ml = a->midiLearn;
+        ml.clearAll();
+        auto* cut = a->apvts.getParameter(PP::FCUT);
+        ml.setLearning(true);
+        cut->beginChangeGesture(); cut->endChangeGesture(); // touching the knob on screen arms it
+        check(ml.getArmedName() == cut->getName(40), "touching a control arms it");
+        const float before = cut->getValue();
+        for (int i = 0; i < 4; ++i) ml.process(cc(74, 65));
+        check(std::abs(cut->getValue() - before) < 1e-6f, "learning CCs never move the armed control");
+        ml.tick();
+        auto maps = ml.getMappings();
+        check(maps.size() == 1 && maps[0].cc == 74 && maps[0].paramId == PP::FCUT && maps[0].enc == Enc::offset64,
+              "CC 74 learned as a relative knob on filter cutoff");
+        ml.setLearning(false);
+        cut->setValueNotifyingHost(0.5f); // fcut defaults fully open: start mid-range so "up" can move
+        ml.process(cc(74, 66));
+        const float up = cut->getValue();
+        ml.process(cc(74, 62));
+        check(up > 0.5f && cut->getValue() < up, "endless knob turns cutoff the right way both directions");
+
+        // a second instance (any project) picks the mapping up from disk
+        std::unique_ptr<PastelProcessor> b(new PastelProcessor());
+        auto* cutB = b->apvts.getParameter(PP::FCUT);
+        cutB->setValueNotifyingHost(0.5f);
+        const float bBefore = cutB->getValue();
+        b->midiLearn.process(cc(74, 70));
+        check(b->midiLearn.getMappings().size() == 1 && cutB->getValue() > bBefore, "mapping is global: a new instance has it");
+
+        // re-learning the same control moves it to the new knob; absolute knob sets directly
+        ml.setLearning(true);
+        cut->beginChangeGesture(); cut->endChangeGesture();
+        for (int v : { 10, 11, 12, 13 }) ml.process(cc(21, v));
+        ml.tick();
+        maps = ml.getMappings();
+        check(maps.size() == 1 && maps[0].cc == 21 && maps[0].enc == Enc::absolute, "re-learning moves the control to the new knob");
+        ml.setLearning(false);
+        ml.process(cc(21, 127));
+        check(std::abs(cut->getValue() - 1.0f) < 1e-6f, "absolute knob sets the value directly");
+
+        // preset knob: one nudge is enough to learn it, each detent steps one preset
+        int stepped = 0;
+        ml.onPresetStep = [&](int d) { stepped += d; };
+        ml.armPresetKnob();
+        ml.process(cc(114, 1));
+        for (int i = 0; i < 10; ++i) ml.tick();
+        check(ml.getPresetKnobCC() == 114, "preset knob learned from one nudge");
+        ml.process(cc(114, 1)); ml.process(cc(114, 3));
+        ml.tick();
+        ml.process(cc(114, 127));
+        ml.tick();
+        check(stepped == 1, "preset knob: two steps forward, one back");
+        ml.onPresetStep = nullptr;
+
+        // preset knob steps the loaded SF2's programs like the Program list does
+        std::unique_ptr<PastelProcessor> c(new PastelProcessor());
+        c->prepareToPlay(44100.0, 512);
+        auto bankProg = [&] { return std::make_pair((int) c->apvts.getRawParameterValue(PP::BANK)->load(),
+                                                    (int) c->apvts.getRawParameterValue(PP::PRESET)->load()); };
+        juce::String lerr;
+        c->loadSoundFile(sfzFile.getFullPathName(), lerr);
+        const auto progBefore = bankProg();
+        c->midiLearn.process(cc(114, 1)); c->midiLearn.tick();
+        check(bankProg() == progBefore, "preset knob: SFZ has no programs, nothing changes");
+        auto sf2Multi = tmp.getChildFile("multi.sf2");
+        writeMinimalSf2(sf2Multi, 440.0f, 3);
+        check(c->loadSoundFile(sf2Multi.getFullPathName(), lerr) && c->sf2Presets().size() == 3, "3-program sf2 fixture loads");
+        if (auto* par = c->apvts.getParameter(PP::PRESET)) par->setValueNotifyingHost(par->convertTo0to1(0.0f));
+        c->midiLearn.process(cc(114, 1)); c->midiLearn.tick();
+        check(bankProg() == std::make_pair(0, 1), "preset knob selects the next SF2 program in a new instance");
+        c->midiLearn.process(cc(114, 1)); c->midiLearn.tick();
+        c->midiLearn.process(cc(114, 1)); c->midiLearn.tick();
+        check(bankProg() == std::make_pair(0, 0), "preset knob wraps past the last program");
+        c->midiLearn.process(cc(114, 127)); c->midiLearn.tick();
+        check(bankProg() == std::make_pair(0, 2), "preset knob steps back (wrapping)");
+        ml.clearAll();
+        check(ml.getMappings().empty() && ml.getPresetKnobCC() < 0, "clear all");
+    }
 
     // realistic fixture: spaced names, default_path, backslashes, note names
     auto realDir = tmp.getChildFile("real");

@@ -9,6 +9,7 @@ PastelProcessor::PastelProcessor()
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "PastelPlayer", createParameterLayout())
 {
+    midiLearn.onPresetStep = [this](int delta) { stepSf2Preset(delta); };
 }
 
 bool PastelProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -146,6 +147,24 @@ juce::String PastelProcessor::currentSoundPath() const { return sampler.currentP
 juce::String PastelProcessor::currentProgramName() const { return sampler.programName(); }
 std::vector<SamplerEngine::Sf2Preset> PastelProcessor::sf2Presets() const { return sampler.getSf2Presets(); }
 bool PastelProcessor::getActiveSf2Preset(int& bank, int& program) const { return sampler.getActiveSf2Preset(bank, program); }
+
+void PastelProcessor::stepSf2Preset(int delta)
+{
+    // same as picking the neighbouring entry in the editor's preset list
+    const auto list = sf2Presets();
+    const int n = (int) list.size();
+    if (n == 0 || delta == 0) return;
+    const int bank = (int) apvts.getRawParameterValue(PP::BANK)->load();
+    const int prog = (int) apvts.getRawParameterValue(PP::PRESET)->load();
+    int cur = -1;
+    for (int i = 0; i < n; ++i)
+        if (list[(size_t) i].bank == bank && list[(size_t) i].program == prog) { cur = i; break; }
+    const int next = cur < 0 ? (delta > 0 ? 0 : n - 1) : ((cur + delta) % n + n) % n;
+    if (auto* par = apvts.getParameter(PP::BANK))
+        par->setValueNotifyingHost(par->convertTo0to1((float) list[(size_t) next].bank));
+    if (auto* par = apvts.getParameter(PP::PRESET))
+        par->setValueNotifyingHost(par->convertTo0to1((float) list[(size_t) next].program));
+}
 bool PastelProcessor::isSoundLoaded() const { return sampler.isLoaded(); }
 
 void PastelProcessor::panic()
@@ -602,6 +621,7 @@ void PastelProcessor::renderWithMidi(juce::AudioBuffer<float>& target, juce::Mid
 void PastelProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+    midiLearn.process(midi); // learned CCs land before this block's params are read
     DspParams p = collectParams();
     HostTime ht;
     if (auto* ph = getPlayHead())

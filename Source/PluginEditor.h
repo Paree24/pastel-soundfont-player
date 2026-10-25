@@ -7,6 +7,7 @@
 #include "PianoStrip.h"
 #include "PresetBrowser.h"
 #include "PastelViews.h"
+#include "MidiLearn.h"
 
 class PastelEditor;
 
@@ -69,6 +70,7 @@ private:
     juce::Label logoLabel, fileLabel;
     juce::TextButton loadBtn { "LOAD" }, prevBtn { "<" }, nextBtn { ">" }, panicBtn { "PANIC" },
                      presetsBtn { "PRESETS" };
+    pastel::MidiLearnButton midiBtn { proc.midiLearn };
     juce::ComboBox bankBox, presetBox;
     juce::Label bankLabel { {}, "Bank" }, presetBoxLabel { {}, "Program" };
 

@@ -60,6 +60,7 @@ target_sources(PastelPlayer PRIVATE
   Source/PianoStrip.cpp
   Source/PlayerPresets.cpp
   Source/PresetBrowser.cpp
+  Source/MidiLearn.cpp
 )
 
 target_include_directories(PastelPlayer PRIVATE Source)
@@ -93,6 +94,7 @@ target_sources(PastelHarness PRIVATE
   Source/PianoStrip.cpp
   Source/PlayerPresets.cpp
   Source/PresetBrowser.cpp
+  Source/MidiLearn.cpp
   Test/Harness.cpp
 )
 target_include_directories(PastelHarness PRIVATE Source)

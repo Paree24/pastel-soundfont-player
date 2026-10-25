@@ -6,6 +6,7 @@
 #include "SamplerEngine.h"
 #include "DSPEngine.h"
 #include "FileLibrary.h"
+#include "MidiLearn.h"
 
 // ============================================================
 // Pastel Soundfont Player — AudioProcessor
@@ -39,6 +40,7 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState apvts;
+    pastel::MidiLearn midiLearn { *this, "Pastel Soundfont Player" }; // global CC map + preset knob
 
     // sound loading: loadSoundFile is synchronous (harness/internal);
     // requestLoad runs in the background so big banks never freeze the DAW
@@ -56,6 +58,8 @@ public:
     juce::String currentProgramName() const;
     std::vector<SamplerEngine::Sf2Preset> sf2Presets() const;
     bool getActiveSf2Preset(int& bank, int& program) const;
+    // preset knob: next / previous SF2 program in the loaded bank list (wraps; SFZ: none)
+    void stepSf2Preset(int delta);
     void panic();
 
     FileLibrary library;

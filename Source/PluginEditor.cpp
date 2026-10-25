@@ -364,6 +364,10 @@ PastelEditor::PastelEditor(PastelProcessor& p)
     presetsBtn.setTooltip("Save and recall the loaded sound with all its settings");
     presetsBtn.onClick = [&] { presetBrowser.setVisible(true); presetBrowser.toFront(true); };
     addAndMakeVisible(presetsBtn);
+    // this theme draws no toggled background: LEARN shows as teal text
+    midiBtn.setColour(juce::TextButton::buttonOnColourId, PastelColors::teal);
+    midiBtn.setColour(juce::TextButton::textColourOnId, PastelColors::teal);
+    addAndMakeVisible(midiBtn);
     presetBrowser.onClose = [&] { presetBrowser.setVisible(false); };
     addChildComponent(presetBrowser);
 
@@ -536,12 +540,13 @@ void PastelEditor::resized()
     prevBtn.setBounds(btnX, btnY, 30, btnH); btnX += 30 + 6;
     nextBtn.setBounds(btnX, btnY, 30, btnH); btnX += 30 + 6;
     panicBtn.setBounds(btnX, btnY, 70, btnH); btnX += 70 + 6;
-    presetsBtn.setBounds(btnX, btnY, 84, btnH);
+    presetsBtn.setBounds(btnX, btnY, 84, btnH); btnX += 84 + 6;
+    midiBtn.setBounds(btnX, btnY, 60, btnH);
 
     int rightX = W - M - pad;   // v3: the meter lives in the OUTPUT card
     // program box shrinks so it never runs into the transport buttons
     const int bankW = 64;
-    const int presetW = juce::jlimit(120, 220, rightX - (presetsBtn.getRight() + 20) - bankW - 10);
+    const int presetW = juce::jlimit(120, 220, rightX - (midiBtn.getRight() + 20) - bankW - 10);
     presetBox.setBounds(rightX - presetW, 30, presetW, 24);
     presetBoxLabel.setBounds(rightX - presetW, 15, presetW, 13);
     rightX -= presetW + 10;
