@@ -16,7 +16,7 @@ PastelLookAndFeel::PastelLookAndFeel()
     pastel::Theme::comboBg = PastelColors::comboBg; pastel::Theme::text = PastelColors::text;
     pastel::Theme::textDim = PastelColors::textDim; pastel::Theme::faint = juce::Colour(0xFF5C5A56);
     pastel::Theme::handle = juce::Colour(0xFFF4F1EC); pastel::Theme::ink = PastelColors::barText;
-    pastel::Theme::regular = latoReg;              pastel::Theme::bold = latoBold;
+    pastel::ThemeFonts::getInstance()->regular = latoReg;              pastel::ThemeFonts::getInstance()->bold = latoBold;
     pastel::Theme::format = [](const juce::String& id, float v) -> juce::String   // stateless
     {
         if (id == "fcut") return v >= 1000.0f ? juce::String(v / 1000.0f, 2) + " kHz" : juce::String(juce::roundToInt(v)) + " Hz";

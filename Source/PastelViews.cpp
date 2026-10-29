@@ -17,7 +17,8 @@ juce::Colour accentFor(juce::Component& c)
 
 juce::Font font(float h, bool bold)
 {
-    auto tf = bold ? Theme::bold : Theme::regular;
+    auto* fonts = ThemeFonts::getInstanceWithoutCreating();
+    juce::Typeface::Ptr tf = fonts == nullptr ? nullptr : (bold ? fonts->bold : fonts->regular);
     if (tf != nullptr) return juce::Font(juce::FontOptions(tf)).withHeight(h);
     return juce::Font(juce::FontOptions(h, bold ? juce::Font::bold : juce::Font::plain));
 }

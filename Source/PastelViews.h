@@ -19,10 +19,18 @@ struct Theme
     static inline juce::Colour faint   { 0xff5c5a56 };
     static inline juce::Colour handle  { 0xfff4f1ec };
     static inline juce::Colour ink     { 0xff1b1d22 }; // text on a filled accent
-    static inline juce::Typeface::Ptr regular, bold;
     // readable value text for a parameter id (Hz, s/ms, dB, cents, %)
     static inline std::function<juce::String(const juce::String& id, float v)> format =
         [](const juce::String&, float v) { return juce::String(juce::roundToInt(v * 100.0f)) + "%"; };
+};
+// The embedded fonts, set by the editor. Freed at JUCE shutdown, not at
+// process exit: a typeface released after the OS font registry is gone
+// crashes on macOS.
+struct ThemeFonts : public juce::DeletedAtShutdown
+{
+    juce::Typeface::Ptr regular, bold;
+    ~ThemeFonts() override { clearSingletonInstance(); }
+    JUCE_DECLARE_SINGLETON_INLINE(ThemeFonts, false)
 };
 juce::Colour accentFor(juce::Component&);   // nearest "accent" property up the parent chain
 juce::Font font(float h, bool bold = true);
